@@ -1,5 +1,5 @@
 {
-  "name": "@coroot/coroot",
+  "name": "@def/coroot",
   "version": "0.1.0",
   "scripts": {
     "build-dev": "vue-cli-service build --dest=../static --watch",
