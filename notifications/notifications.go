@@ -1,6 +1,7 @@
 package notifications
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"time"
@@ -18,13 +19,14 @@ const (
 
 type NotificationClient interface {
 	SendIncident(ctx context.Context, baseUrl string, n *db.IncidentNotification) error
+	SendDeployment(ctx context.Context, project *db.Project, ds model.ApplicationDeploymentStatus) error
 }
 
-func getClient(destination db.IntegrationType, integrations db.Integrations) NotificationClient {
-	switch destination {
+func getClient(destination db.IncidentNotificationDestination, integrations db.Integrations) NotificationClient {
+	switch destination.IntegrationType {
 	case db.IntegrationTypeSlack:
 		if cfg := integrations.Slack; cfg != nil && cfg.Incidents {
-			return NewSlack(cfg.Token, cfg.DefaultChannel)
+			return NewSlack(cfg.Token, cmp.Or(destination.SlackChannel, cfg.DefaultChannel))
 		}
 	case db.IntegrationTypeTeams:
 		if cfg := integrations.Teams; cfg != nil && cfg.Incidents {
@@ -51,21 +53,21 @@ func incidentDetails(app *model.Application, incident *model.ApplicationIncident
 	if !incident.Resolved() {
 		for _, r := range app.Reports {
 			for _, ch := range r.Checks {
-				if ch.Status < model.WARNING {
+				if r.Name == model.AuditReportSLO || ch.Status < model.WARNING {
 					continue
 				}
 				reports = append(reports, db.IncidentNotificationDetailsReport{Name: r.Name, Check: ch.Title, Message: ch.Message})
 			}
 		}
 	} else {
-		for _, r := range app.Reports {
-			if r.Name != model.AuditReportSLO {
-				continue
-			}
-			for _, ch := range r.Checks {
-				reports = append(reports, db.IncidentNotificationDetailsReport{Name: r.Name, Check: ch.Title, Message: ch.Message})
-			}
-		}
+		//for _, r := range app.Reports {
+		//if r.Name != model.AuditReportSLO {
+		//	continue
+		//}
+		//for _, ch := range r.Checks {
+		//	reports = append(reports, db.IncidentNotificationDetailsReport{Name: r.Name, Check: ch.Title, Message: ch.Message})
+		//}
+		//}
 	}
 	if len(reports) == 0 {
 		return nil

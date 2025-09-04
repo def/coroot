@@ -12,9 +12,10 @@
         <DependencyMap v-if="w.dependency_map" :nodes="w.dependency_map.nodes" :links="w.dependency_map.links" />
         <Table v-if="w.table" :header="w.table.header" :rows="w.table.rows" />
         <Heatmap v-if="w.heatmap" :heatmap="w.heatmap" :selection="heatmapSelection" @select="heatmapDrillDown" />
-        <Logs v-if="w.logs" :appId="w.logs.application_id" :check="w.logs.check" />
+        <AppLogs v-if="w.logs" :appId="w.logs.application_id" :check="w.logs.check" />
         <Profiling v-if="w.profiling" :appId="w.profiling.application_id" />
-        <Tracing v-if="w.tracing" :appId="w.tracing.application_id" />
+        <AppTraces v-if="w.tracing" :appId="w.tracing.application_id" />
+        <h2 v-if="w.group_header" class="group-header text-h6">{{ w.group_header }}</h2>
     </div>
 </template>
 
@@ -24,16 +25,16 @@ import ChartGroup from './ChartGroup';
 import DependencyMap from './DependencyMap';
 import Table from './Table';
 import Heatmap from './Heatmap';
-import Logs from '../views/Logs';
+import AppLogs from '../views/AppLogs.vue';
 import Profiling from '../views/Profiling';
-import Tracing from '../views/Tracing';
+import AppTraces from '../views/AppTraces.vue';
 
 export default {
     props: {
         w: Object,
     },
 
-    components: { Chart, ChartGroup, DependencyMap, Table, Heatmap, Logs, Profiling, Tracing },
+    components: { Chart, ChartGroup, DependencyMap, Table, Heatmap, AppLogs, Profiling, AppTraces },
 
     computed: {
         heatmapSelection() {
@@ -45,7 +46,7 @@ export default {
             if (!l) {
                 return null;
             }
-            return `https://coroot.com/docs/coroot/${l.group}/${l.item}${l.hash ? '#' + l.hash : ''}`;
+            return `https://docs.coroot.com/${l.group}/${l.item}${l.hash ? '#' + l.hash : ''}`;
         },
     },
 
@@ -70,4 +71,10 @@ export default {
 };
 </script>
 
-<style scoped></style>
+<style scoped>
+.group-header {
+    padding: 4px 8px;
+    background-color: var(--background-color-hi);
+    border-radius: 4px;
+}
+</style>

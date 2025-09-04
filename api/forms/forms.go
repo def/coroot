@@ -1,6 +1,7 @@
 package forms
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"github.com/coroot/coroot/model"
 	"github.com/coroot/coroot/notifications"
 	"github.com/coroot/coroot/prom"
+	"github.com/coroot/coroot/timeseries"
 	"github.com/coroot/coroot/utils"
 )
 
@@ -48,6 +50,24 @@ func (f *ProjectForm) Valid() bool {
 		return false
 	}
 	return true
+}
+
+type ApiKeyForm struct {
+	Action string `json:"action"`
+	db.ApiKey
+}
+
+func (f *ApiKeyForm) Valid() bool {
+	return true
+}
+
+type DashboardForm struct {
+	Action string `json:"action"`
+	db.Dashboard
+}
+
+func (f *DashboardForm) Valid() bool {
+	return f.Name != ""
 }
 
 type CheckConfigForm struct {
@@ -87,29 +107,75 @@ func (f *CheckConfigSLOLatencyForm) Valid() bool {
 }
 
 type ApplicationCategoryForm struct {
-	Name    model.ApplicationCategory `json:"name"`
-	NewName model.ApplicationCategory `json:"new_name"`
-
-	CustomPatternsStr string `json:"custom_patterns"`
-	CustomPatterns    []string
-
-	NotifyOfDeployments bool `json:"notify_of_deployments"`
+	Action string                    `json:"action"`
+	Id     model.ApplicationCategory `json:"id"`
+	db.ApplicationCategory
+	Test *struct {
+		Incident   *db.ApplicationCategoryNotificationDestinations `json:"incident,omitempty"`
+		Deployment *db.ApplicationCategoryNotificationDestinations `json:"deployment,omitempty"`
+	} `json:"test,omitempty"`
 }
 
 func (f *ApplicationCategoryForm) Valid() bool {
-	if !slugRe.MatchString(string(f.NewName)) {
+	if f.Test != nil {
+		return true
+	}
+	if !slugRe.MatchString(string(f.Name)) {
 		return false
 	}
-	f.CustomPatterns = strings.Fields(f.CustomPatternsStr)
-	if !utils.GlobValidate(f.CustomPatterns) {
+	customPatterns := strings.Fields(f.CustomPatterns)
+	if !utils.GlobValidate(customPatterns) {
 		return false
 	}
-	for _, p := range f.CustomPatterns {
+	for _, p := range customPatterns {
 		if strings.Count(p, "/") != 1 || strings.Index(p, "/") < 1 {
 			return false
 		}
 	}
 	return true
+}
+
+func (f *ApplicationCategoryForm) SendTestNotification(ctx context.Context, project *db.Project) error {
+	if f.Test == nil {
+		return nil
+	}
+	integrations := project.Settings.Integrations
+	var client notifications.NotificationClient
+	switch {
+	case f.Test.Incident != nil:
+		if slack := f.Test.Incident.Slack; slack != nil && integrations.Slack != nil {
+			client = notifications.NewSlack(integrations.Slack.Token, cmp.Or(slack.Channel, integrations.Slack.DefaultChannel))
+		}
+		if teams := f.Test.Incident.Teams; teams != nil && integrations.Teams != nil {
+			client = notifications.NewTeams(integrations.Teams.WebhookUrl)
+		}
+		if pagerduty := f.Test.Incident.Pagerduty; pagerduty != nil && integrations.Pagerduty != nil {
+			client = notifications.NewPagerduty(integrations.Pagerduty.IntegrationKey)
+		}
+		if opsgenie := f.Test.Incident.Opsgenie; opsgenie != nil && integrations.Opsgenie != nil {
+			client = notifications.NewOpsgenie(integrations.Opsgenie.ApiKey, integrations.Opsgenie.EUInstance)
+		}
+		if webhook := f.Test.Incident.Webhook; webhook != nil && integrations.Webhook != nil {
+			client = notifications.NewWebhook(integrations.Webhook)
+		}
+		if client != nil {
+			return client.SendIncident(ctx, integrations.BaseUrl, testIncidentNotification(project))
+		}
+	case f.Test.Deployment != nil:
+		if slack := f.Test.Deployment.Slack; slack != nil && integrations.Slack != nil {
+			client = notifications.NewSlack(integrations.Slack.Token, cmp.Or(slack.Channel, integrations.Slack.DefaultChannel))
+		}
+		if teams := f.Test.Deployment.Teams; teams != nil && integrations.Teams != nil {
+			client = notifications.NewTeams(integrations.Teams.WebhookUrl)
+		}
+		if webhook := f.Test.Deployment.Webhook; webhook != nil && integrations.Webhook != nil {
+			client = notifications.NewWebhook(integrations.Webhook)
+		}
+		if client != nil {
+			return client.SendDeployment(ctx, project, testDeploymentNotification())
+		}
+	}
+	return nil
 }
 
 type CustomApplicationForm struct {
@@ -126,6 +192,17 @@ func (f *CustomApplicationForm) Valid() bool {
 	}
 	f.InstancePatterns = strings.Fields(f.InstancePatternsStr)
 	if !utils.GlobValidate(f.InstancePatterns) {
+		return false
+	}
+	return true
+}
+
+type CustomCloudPricingForm struct {
+	db.CustomCloudPricing
+}
+
+func (f *CustomCloudPricingForm) Valid() bool {
+	if f.PerCPUCore <= 0 || f.PerMemoryGb <= 0 {
 		return false
 	}
 	return true
@@ -163,6 +240,16 @@ func (f *ApplicationSettingsLogsForm) Valid() bool {
 	return true
 }
 
+type ApplicationSettingsRisksForm struct {
+	Action string        `json:"action"`
+	Key    model.RiskKey `json:"key"`
+	Reason string        `json:"reason"`
+}
+
+func (f *ApplicationSettingsRisksForm) Valid() bool {
+	return true
+}
+
 type IntegrationsForm struct {
 	BaseUrl string `json:"base_url"`
 }
@@ -182,7 +269,7 @@ type IntegrationForm interface {
 	Test(ctx context.Context, project *db.Project) error
 }
 
-func NewIntegrationForm(t db.IntegrationType, globalClickHouse *db.IntegrationClickhouse, globalPrometheus *db.IntegrationsPrometheus) IntegrationForm {
+func NewIntegrationForm(t db.IntegrationType, globalClickHouse *db.IntegrationClickhouse, globalPrometheus *db.IntegrationPrometheus) IntegrationForm {
 	switch t {
 	case db.IntegrationTypePrometheus:
 		return &IntegrationFormPrometheus{global: globalPrometheus}
@@ -205,15 +292,20 @@ func NewIntegrationForm(t db.IntegrationType, globalClickHouse *db.IntegrationCl
 }
 
 type IntegrationFormPrometheus struct {
-	db.IntegrationsPrometheus
-	global *db.IntegrationsPrometheus
+	db.IntegrationPrometheus
+	global *db.IntegrationPrometheus
 }
 
 func (f *IntegrationFormPrometheus) Valid() bool {
-	if _, err := url.Parse(f.IntegrationsPrometheus.Url); err != nil {
+	if _, err := url.Parse(f.IntegrationPrometheus.Url); err != nil {
 		return false
 	}
-	if !prom.IsSelectorValid(f.IntegrationsPrometheus.ExtraSelector) {
+	if f.RemoteWriteUrl != "" {
+		if _, err := url.Parse(f.IntegrationPrometheus.RemoteWriteUrl); err != nil {
+			return false
+		}
+	}
+	if !prom.IsSelectorValid(f.IntegrationPrometheus.ExtraSelector) {
 		return false
 	}
 	var validHeaders []utils.Header
@@ -232,7 +324,7 @@ func (f *IntegrationFormPrometheus) Get(project *db.Project, masked bool) {
 		f.RefreshInterval = db.DefaultRefreshInterval
 		return
 	}
-	f.IntegrationsPrometheus = *cfg
+	f.IntegrationPrometheus = *cfg
 	if masked {
 		f.Url = "http://<hidden>"
 		if f.BasicAuth != nil {
@@ -241,6 +333,9 @@ func (f *IntegrationFormPrometheus) Get(project *db.Project, masked bool) {
 		}
 		for i := range f.CustomHeaders {
 			f.CustomHeaders[i].Value = "<hidden>"
+		}
+		if f.RemoteWriteUrl != "" {
+			f.RemoteWriteUrl = "<hidden>"
 		}
 	}
 }
@@ -252,7 +347,7 @@ func (f *IntegrationFormPrometheus) Update(ctx context.Context, project *db.Proj
 	if err := f.Test(ctx, project); err != nil {
 		return err
 	}
-	project.Prometheus = f.IntegrationsPrometheus
+	project.Prometheus = f.IntegrationPrometheus
 	return nil
 }
 
@@ -266,7 +361,7 @@ func (f *IntegrationFormPrometheus) Test(ctx context.Context, project *db.Projec
 	if err != nil {
 		return err
 	}
-	if err := client.Ping(ctx); err != nil {
+	if err = client.Ping(ctx); err != nil {
 		return err
 	}
 	return nil
@@ -338,7 +433,7 @@ func (f *IntegrationFormClickhouse) Test(ctx context.Context, project *db.Projec
 }
 
 type IntegrationFormAWS struct {
-	model.AWSConfig
+	db.IntegrationAWS
 }
 
 func (f *IntegrationFormAWS) Valid() bool {
@@ -348,7 +443,7 @@ func (f *IntegrationFormAWS) Valid() bool {
 func (f *IntegrationFormAWS) Get(project *db.Project, masked bool) {
 	cfg := project.Settings.Integrations.AWS
 	if cfg != nil {
-		f.AWSConfig = *cfg
+		f.IntegrationAWS = *cfg
 	}
 	if masked {
 		f.AccessKeyID = "<hidden>"
@@ -357,7 +452,7 @@ func (f *IntegrationFormAWS) Get(project *db.Project, masked bool) {
 }
 
 func (f *IntegrationFormAWS) Update(ctx context.Context, project *db.Project, clear bool) error {
-	cfg := &f.AWSConfig
+	cfg := &f.IntegrationAWS
 	if clear {
 		cfg = nil
 	} else {
@@ -378,7 +473,7 @@ type IntegrationFormSlack struct {
 }
 
 func (f *IntegrationFormSlack) Valid() bool {
-	if f.Token == "" || f.DefaultChannel == "" {
+	if err := f.Validate(); err != nil {
 		return false
 	}
 	return true
@@ -415,7 +510,7 @@ type IntegrationFormTeams struct {
 }
 
 func (f *IntegrationFormTeams) Valid() bool {
-	if f.WebhookUrl == "" {
+	if err := f.Validate(); err != nil {
 		return false
 	}
 	return true
@@ -452,7 +547,7 @@ type IntegrationFormPagerduty struct {
 }
 
 func (f *IntegrationFormPagerduty) Valid() bool {
-	if f.IntegrationKey == "" {
+	if err := f.Validate(); err != nil {
 		return false
 	}
 	return true
@@ -488,7 +583,7 @@ type IntegrationFormOpsgenie struct {
 }
 
 func (f *IntegrationFormOpsgenie) Valid() bool {
-	if f.ApiKey == "" {
+	if err := f.Validate(); err != nil {
 		return false
 	}
 	return true
@@ -524,13 +619,7 @@ type IntegrationFormWebhook struct {
 }
 
 func (f *IntegrationFormWebhook) Valid() bool {
-	if f.Url == "" {
-		return false
-	}
-	if f.Incidents && f.IncidentTemplate == "" {
-		return false
-	}
-	if f.Deployments && f.DeploymentTemplate == "" {
+	if err := f.Validate(); err != nil {
 		return false
 	}
 	return true
@@ -579,13 +668,13 @@ func (f *IntegrationFormWebhook) Test(ctx context.Context, project *db.Project) 
 func testIncidentNotification(project *db.Project) *db.IncidentNotification {
 	return &db.IncidentNotification{
 		ProjectId:     project.Id,
-		ApplicationId: model.NewApplicationId("default", model.ApplicationKindDeployment, "test-alert-fake-app"),
+		ApplicationId: model.NewApplicationId("default", model.ApplicationKindDeployment, "fake-app"),
 		IncidentKey:   "123ab456",
-		Status:        model.WARNING,
+		Status:        model.CRITICAL,
 		Details: &db.IncidentNotificationDetails{
 			Reports: []db.IncidentNotificationDetailsReport{
-				{Name: model.AuditReportSLO, Check: model.Checks.SLOLatency.Title, Message: "error budget burn rate is 20x within 1 hour"},
 				{Name: model.AuditReportNetwork, Check: model.Checks.NetworkRTT.Title, Message: "high network latency to 2 upstream services"},
+				{Name: model.AuditReportLogs, Check: model.Checks.LogErrors.Title, Message: "1206 errors occurred"},
 			},
 		},
 	}
@@ -601,9 +690,11 @@ func testDeploymentNotification() model.ApplicationDeploymentStatus {
 			{Report: model.AuditReportCPU, Ok: true, Message: "Memory: looks like the memory leak has been fixed"},
 		},
 		Deployment: &model.ApplicationDeployment{
-			ApplicationId: model.NewApplicationId("default", model.ApplicationKindDeployment, "test-deployment-fake-app"),
+			ApplicationId: model.NewApplicationId("default", model.ApplicationKindDeployment, "fake-app"),
 			Name:          "123ab456",
+			StartedAt:     timeseries.Now().Add(-model.ApplicationDeploymentMinLifetime),
 			Details:       &model.ApplicationDeploymentDetails{ContainerImages: []string{"app:v1.8.2"}},
+			Notifications: &model.ApplicationDeploymentNotifications{},
 		},
 	}
 }

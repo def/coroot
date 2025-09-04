@@ -107,7 +107,7 @@ func FormatLinkStats(requests, latency, bytesSent, bytesReceived float32, issue 
 	if len(line) > 0 {
 		res = append(res, line)
 	}
-	if bytesSent > 0 || bytesReceived > 0 {
+	if bytesSent > 0 && bytesReceived > 0 {
 		line = ""
 		v, u := FormatBytes(bytesSent)
 		line += "↑" + v + u + "/s"
@@ -116,4 +116,14 @@ func FormatLinkStats(requests, latency, bytesSent, bytesReceived float32, issue 
 		res = append(res, line)
 	}
 	return res
+}
+
+func Capitalize(s string) string {
+	if len(s) == 0 {
+		return ""
+	}
+	if len(s) == 1 {
+		return strings.ToUpper(s)
+	}
+	return strings.ToUpper(s[0:1]) + s[1:]
 }

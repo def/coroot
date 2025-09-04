@@ -93,7 +93,7 @@ Deployment of {{ .Application.Name }}@{{ .Application.Namespace }}
 ```
    </TabItem>
    <TabItem value="json" label="JSON">
-If the system you aim to integrate accepts JSON-formatted messages, you can employ the built-in json template function:
+If the system you aim to integrate accepts JSON-formatted messages, you can employ the built-in `json` template function:
 
 ```gotemplate
 {{ json . }}
@@ -161,6 +161,10 @@ Follow the steps below to create a Telegram Bot and obtain `chat_id`:
    * Send a message to the chat where your bot is added.
    * Now, you need to fetch the chat ID. You can do this using various methods:
    * Use a Telegram bot like `@userinfobot` or `@getidsbot`. Send the command `/getid` in the chat and it will reply with the chat ID.
+
+Now build the link for webhook. It will look like `https://api.telegram.org/bot[botID]:[botToken]/sendMessage` and paste it into the Webhook URL
+
+Then proceed with filling templates.
 
 Sample incident template:
 

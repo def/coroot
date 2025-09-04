@@ -10,6 +10,7 @@ const (
 	ActionEdit Verb = "edit"
 
 	ScopeAll                          Scope = "*"
+	ScopeSettings                     Scope = "settings"
 	ScopeUsers                        Scope = "users"
 	ScopeRoles                        Scope = "roles"
 	ScopeProjectAll                   Scope = "project.*"
@@ -17,12 +18,18 @@ const (
 	ScopeProjectIntegrations          Scope = "project.integrations"
 	ScopeProjectApplicationCategories Scope = "project.application_categories"
 	ScopeProjectCustomApplications    Scope = "project.custom_applications"
+	ScopeProjectCustomCloudPricing    Scope = "project.custom_cloud_pricing"
 	ScopeProjectInspections           Scope = "project.inspections"
 	ScopeProjectInstrumentations      Scope = "project.instrumentations"
 	ScopeProjectTraces                Scope = "project.traces"
+	ScopeProjectLogs                  Scope = "project.logs"
 	ScopeProjectCosts                 Scope = "project.costs"
+	ScopeProjectAnomalies             Scope = "project.anomalies"
+	ScopeProjectRisks                 Scope = "project.risks"
 	ScopeApplication                  Scope = "project.application"
 	ScopeNode                         Scope = "project.node"
+	ScopeDashboards                   Scope = "project.dashboards"
+	ScopeDashboard                    Scope = "project.dashboard"
 )
 
 type Action struct {

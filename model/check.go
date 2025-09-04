@@ -523,6 +523,12 @@ func (ch *Check) Calc() {
 	ch.SetStatus(WARNING, buf.String())
 }
 
+type CheckConfigSource string
+
+const (
+	CheckConfigSourceKubernetesAnnotations CheckConfigSource = "kubernetes-annotations"
+)
+
 type CheckConfigSimple struct {
 	Threshold float32 `json:"threshold"`
 }
@@ -532,6 +538,9 @@ type CheckConfigSLOAvailability struct {
 	TotalRequestsQuery  string  `json:"total_requests_query"`
 	FailedRequestsQuery string  `json:"failed_requests_query"`
 	ObjectivePercentage float32 `json:"objective_percentage"`
+
+	Source CheckConfigSource `json:"source,omitempty"`
+	Error  string            `json:"error,omitempty"`
 }
 
 func (cfg *CheckConfigSLOAvailability) Total() string {
@@ -547,6 +556,9 @@ type CheckConfigSLOLatency struct {
 	HistogramQuery      string  `json:"histogram_query"`
 	ObjectiveBucket     float32 `json:"objective_bucket"`
 	ObjectivePercentage float32 `json:"objective_percentage"`
+
+	Source CheckConfigSource `json:"source,omitempty"`
+	Error  string            `json:"error,omitempty"`
 }
 
 func (cfg *CheckConfigSLOLatency) Histogram() string {
@@ -555,20 +567,39 @@ func (cfg *CheckConfigSLOLatency) Histogram() string {
 
 type CheckConfigs map[ApplicationId]map[CheckId]json.RawMessage
 
-func (cc CheckConfigs) getRaw(appId ApplicationId, checkId CheckId) json.RawMessage {
-	for _, i := range []ApplicationId{appId, {}} {
-		if appConfigs, ok := cc[i]; ok {
+func (cc CheckConfigs) getRaw(appId ApplicationId, checkId CheckId) (json.RawMessage, bool) {
+	appIdStr := appId.String()
+
+	if appConfigs, ok := cc[appId]; ok {
+		if cfg, ok := appConfigs[checkId]; ok {
+			return cfg, false
+		}
+	}
+
+	for configAppId, appConfigs := range cc {
+		if configAppId.IsZero() {
+			continue
+		}
+		configAppIdStr := configAppId.String()
+		if utils.GlobMatch(appIdStr, configAppIdStr) {
 			if cfg, ok := appConfigs[checkId]; ok {
-				return cfg
+				return cfg, false
 			}
 		}
 	}
-	return nil
+
+	if appConfigs, ok := cc[ApplicationId{}]; ok {
+		if cfg, ok := appConfigs[checkId]; ok {
+			return cfg, true
+		}
+	}
+
+	return nil, false
 }
 
 func (cc CheckConfigs) GetSimple(checkId CheckId, appId ApplicationId) CheckConfigSimple {
 	cfg := CheckConfigSimple{Threshold: Checks.index[checkId].DefaultThreshold}
-	raw := cc.getRaw(appId, checkId)
+	raw, _ := cc.getRaw(appId, checkId)
 	if raw == nil {
 		return cfg
 	}
@@ -639,12 +670,9 @@ func (cc CheckConfigs) GetAvailability(appId ApplicationId) (CheckConfigSLOAvail
 		Custom:              false,
 		ObjectivePercentage: Checks.SLOAvailability.DefaultThreshold,
 	}
-	appConfigs := cc[appId]
-	if appConfigs == nil {
-		return defaultCfg, true
-	}
-	raw, ok := appConfigs[Checks.SLOAvailability.Id]
-	if !ok {
+
+	raw, _ := cc.getRaw(appId, Checks.SLOAvailability.Id)
+	if raw == nil {
 		return defaultCfg, true
 	}
 	res, err := unmarshal[[]CheckConfigSLOAvailability](raw)
@@ -660,20 +688,17 @@ func (cc CheckConfigs) GetAvailability(appId ApplicationId) (CheckConfigSLOAvail
 
 func (cc CheckConfigs) GetLatency(appId ApplicationId, category ApplicationCategory) (CheckConfigSLOLatency, bool) {
 	objectiveBucket := float32(0.5)
+	auxObjectiveBucket := float32(5)
 	if category.Auxiliary() {
-		objectiveBucket = 5
+		objectiveBucket = auxObjectiveBucket
 	}
 	defaultCfg := CheckConfigSLOLatency{
 		Custom:              false,
 		ObjectivePercentage: Checks.SLOLatency.DefaultThreshold,
 		ObjectiveBucket:     objectiveBucket,
 	}
-	appConfigs := cc[appId]
-	if appConfigs == nil {
-		return defaultCfg, true
-	}
-	raw, ok := appConfigs[Checks.SLOLatency.Id]
-	if !ok {
+	raw, projectDefault := cc.getRaw(appId, Checks.SLOLatency.Id)
+	if raw == nil {
 		return defaultCfg, true
 	}
 	res, err := unmarshal[[]CheckConfigSLOLatency](raw)
@@ -683,6 +708,11 @@ func (cc CheckConfigs) GetLatency(appId ApplicationId, category ApplicationCateg
 	}
 	if len(res) == 0 {
 		return defaultCfg, true
+	}
+	if projectDefault && category.Auxiliary() {
+		v := res[0]
+		v.ObjectiveBucket = auxObjectiveBucket
+		return v, false
 	}
 	return res[0], false
 }

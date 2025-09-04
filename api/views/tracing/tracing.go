@@ -79,7 +79,7 @@ func Render(ctx context.Context, ch *clickhouse.Client, app *model.Application, 
 
 	v := &View{}
 
-	services, err := ch.GetServicesFromTraces(ctx)
+	services, err := ch.GetServicesFromTraces(ctx, w.Ctx.From)
 	if err != nil {
 		klog.Errorln(err)
 		v.Status = model.WARNING
@@ -101,7 +101,7 @@ func Render(ctx context.Context, ch *clickhouse.Client, app *model.Application, 
 	if app.Settings != nil && app.Settings.Tracing != nil {
 		otelService = app.Settings.Tracing.Service
 	} else {
-		otelService = model.GuessService(otelServices, app.Id)
+		otelService = model.GuessService(otelServices, w, app)
 	}
 	for _, s := range otelServices {
 		v.Services = append(v.Services, Service{Name: s, Linked: s == otelService})
@@ -145,7 +145,7 @@ func Render(ctx context.Context, ch *clickhouse.Client, app *model.Application, 
 				Ctx:              w.Ctx,
 				ExcludePeerAddrs: ignoredPeerAddrs,
 			}
-			sq.Filters = append(sq.Filters, clickhouse.NewSpanFilter("ServiceName", "=", otelService))
+			sq.AddFilter("ServiceName", "=", otelService)
 			histogram, e = ch.GetSpansByServiceNameHistogram(ctx, sq)
 			if e != nil {
 				err = e
@@ -165,7 +165,7 @@ func Render(ctx context.Context, ch *clickhouse.Client, app *model.Application, 
 				Limit:            limit,
 				ExcludePeerAddrs: ignoredPeerAddrs,
 			}
-			sq.Filters = append(sq.Filters, clickhouse.NewSpanFilter("ServiceName", "=", otelService))
+			sq.AddFilter("ServiceName", "=", otelService)
 			spans, e = ch.GetSpansByServiceName(ctx, sq)
 			if e != nil {
 				err = e
@@ -341,11 +341,11 @@ func getClientsByAppClients(spans []*model.TraceSpan, appClients map[string]*mod
 func getAppClients(app *model.Application) map[string]*model.Application {
 	res := map[string]*model.Application{}
 	for _, d := range app.Downstreams {
-		client := d.Instance.Owner
+		client := d.Application
 		if client == nil || client == app {
 			continue
 		}
-		if !app.Category.Monitoring() && client.Category.Monitoring() {
+		if app.Id.Kind != model.ApplicationKindExternalService && !app.Category.Monitoring() && client.Category.Monitoring() {
 			continue
 		}
 		for _, i := range client.Instances {

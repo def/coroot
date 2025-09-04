@@ -4,16 +4,18 @@
             {{ error }}
         </v-alert>
         <div v-if="status">
-            <div class="text-truncate">
+            <div class="d-flex flex-nowrap">
                 <Led :status="status.prometheus.status" />
-                <span class="font-weight-medium">prometheus</span>:
-                <span v-if="status.prometheus.error">
-                    {{ status.prometheus.error }}
-                </span>
-                <span v-else>
-                    {{ status.prometheus.message }}
-                </span>
-                <router-link v-if="status.prometheus.action === 'configure'" :to="{ params: { tab: 'prometheus' } }">configure</router-link>
+                <div>
+                    <span class="font-weight-medium">prometheus</span>:
+                    <template v-if="status.prometheus.error">
+                        {{ status.prometheus.error }}
+                    </template>
+                    <template v-else>
+                        {{ status.prometheus.message }}
+                    </template>
+                    <router-link v-if="status.prometheus.action === 'configure'" :to="{ params: { tab: 'prometheus' } }">configure</router-link>
+                </div>
             </div>
 
             <div class="d-flex align-center mt-2">
@@ -42,7 +44,6 @@
                     <template v-if="loading">checking...</template>
                     <template v-else>no kube-state-metrics installed</template>
                 </template>
-                (<a href="https://coroot.com/docs/metric-exporters/kube-state-metrics" target="_blank">docs</a>)
             </div>
         </div>
     </div>

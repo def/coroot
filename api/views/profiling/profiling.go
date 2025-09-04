@@ -43,7 +43,7 @@ type Query struct {
 	Instance string            `json:"instance"`
 }
 
-func Render(ctx context.Context, ch *clickhouse.Client, app *model.Application, query url.Values, wCtx timeseries.Context) *View {
+func Render(ctx context.Context, ch *clickhouse.Client, app *model.Application, query url.Values, w *model.World) *View {
 	if ch == nil {
 		return nil
 	}
@@ -61,10 +61,10 @@ func Render(ctx context.Context, ch *clickhouse.Client, app *model.Application, 
 		}
 	}
 	if q.From == 0 {
-		q.From = wCtx.From
+		q.From = w.Ctx.From
 	}
 	if q.To == 0 {
-		q.To = wCtx.To
+		q.To = w.Ctx.To
 	}
 
 	v := &View{}
@@ -86,7 +86,7 @@ func Render(ctx context.Context, ch *clickhouse.Client, app *model.Application, 
 				services[model.ContainerIdToServiceName(c.Id)] = true
 			}
 		}
-		if s := model.GuessService(maps.Keys(profileTypes), app.Id); len(services) == 0 && s != "" {
+		if s := model.GuessService(maps.Keys(profileTypes), w, app); len(services) == 0 && s != "" {
 			services[s] = true
 		}
 	}
@@ -144,7 +144,7 @@ func Render(ctx context.Context, ch *clickhouse.Client, app *model.Application, 
 		q.Type = v.Profiles[0].Type
 	}
 
-	chart, containers := getChart(app, q.Type, wCtx)
+	chart, containers := getChart(app, q.Type, w.Ctx, q.Instance)
 	v.Chart = chart
 	v.Instances = maps.Keys(containers)
 	sort.Strings(v.Instances)
@@ -183,16 +183,16 @@ func Render(ctx context.Context, ch *clickhouse.Client, app *model.Application, 
 	return v
 }
 
-func getChart(app *model.Application, typ model.ProfileType, ctx timeseries.Context) (*model.Chart, map[string][]string) {
+func getChart(app *model.Application, typ model.ProfileType, ctx timeseries.Context, instance string) (*model.Chart, map[string][]string) {
 	var chart *model.Chart
 	var containerToSeriesF func(c *model.Container) *timeseries.TimeSeries
 	category := model.Profiles[typ].Category
 	switch category {
 	case model.ProfileCategoryCPU:
-		chart = model.NewChart(ctx, "CPU usage by instance, cores").Stacked()
+		chart = model.NewChart(ctx, "CPU usage by instance, cores")
 		containerToSeriesF = func(c *model.Container) *timeseries.TimeSeries { return c.CpuUsage }
 	case model.ProfileCategoryMemory:
-		chart = model.NewChart(ctx, "Memory (RSS) usage by instance, bytes").Stacked()
+		chart = model.NewChart(ctx, "Memory (RSS) usage by instance, bytes")
 		containerToSeriesF = func(c *model.Container) *timeseries.TimeSeries { return c.MemoryRss }
 	default:
 		return nil, nil
@@ -204,7 +204,9 @@ func getChart(app *model.Application, typ model.ProfileType, ctx timeseries.Cont
 			agg.Add(containerToSeriesF(c))
 			containers[i.Name] = append(containers[i.Name], c.Id)
 		}
-		chart.AddSeries(i.Name, agg)
+		if instance == "" || i.Name == instance {
+			chart.AddSeries(i.Name, agg)
+		}
 	}
 	events := model.EventsToAnnotations(app.Events, ctx)
 	incidents := model.IncidentsToAnnotations(app.Incidents, ctx)

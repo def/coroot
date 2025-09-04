@@ -3,12 +3,13 @@ package cache
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/coroot/coroot/cache/chunk"
-	"github.com/coroot/coroot/constructor"
 	"github.com/coroot/coroot/db"
 	"github.com/coroot/coroot/model"
 	"github.com/coroot/coroot/timeseries"
+	"golang.org/x/exp/maps"
 )
 
 func (c *Cache) GetCacheClient(projectId db.ProjectId) *Client {
@@ -23,7 +24,7 @@ type Client struct {
 	projectId db.ProjectId
 }
 
-func (c *Client) QueryRange(ctx context.Context, query string, from, to timeseries.Time, step timeseries.Duration, fillFunc timeseries.FillFunc) ([]model.MetricValues, error) {
+func (c *Client) QueryRange(ctx context.Context, query string, from, to timeseries.Time, step timeseries.Duration, fillFunc timeseries.FillFunc) ([]*model.MetricValues, error) {
 	c.cache.lock.RLock()
 	defer c.cache.lock.RUnlock()
 	projData := c.cache.byProject[c.projectId]
@@ -33,13 +34,19 @@ func (c *Client) QueryRange(ctx context.Context, query string, from, to timeseri
 	hash := queryHash(query)
 	qData := projData.queries[hash]
 	if qData == nil {
-		return nil, fmt.Errorf("%w: %s", constructor.ErrUnknownQuery, query)
+		return nil, nil
 	}
 	from = from.Truncate(step)
 	to = to.Truncate(step)
-	res := map[uint64]model.MetricValues{}
+	res := map[uint64]*model.MetricValues{}
 	resPoints := int(to.Sub(from)/step + 1)
-	for _, ch := range qData.chunksOnDisk {
+
+	chunks := maps.Values(qData.chunksOnDisk)
+	sort.Slice(chunks, func(i, j int) bool {
+		return chunks[i].Created < chunks[j].Created
+	})
+
+	for _, ch := range chunks {
 		if ch.From > to || ch.To() < from {
 			continue
 		}
@@ -48,11 +55,7 @@ func (c *Client) QueryRange(ctx context.Context, query string, from, to timeseri
 			return nil, err
 		}
 	}
-	r := make([]model.MetricValues, 0, len(res))
-	for _, mv := range res {
-		r = append(r, mv)
-	}
-	return r, nil
+	return maps.Values(res), nil
 }
 
 func (c *Client) GetStep(from, to timeseries.Time) (timeseries.Duration, error) {

@@ -52,7 +52,7 @@ export function durationPretty(ms) {
         return duration(ms, 'm');
     }
     if (ms > MINUTE) {
-        return duration(ms, 's');
+        return duration(ms, 'm');
     }
     return duration(ms, 'ms');
 }
@@ -62,7 +62,17 @@ export function date(ms, format) {
 }
 
 export function timeSinceNow(ms) {
-    return durationPretty(Date.now() - ms);
+    const d = Date.now() - ms;
+    if (d > DAY) {
+        return duration(d, 'd');
+    }
+    if (d > HOUR) {
+        return duration(d, 'h');
+    }
+    if (d > MINUTE) {
+        return duration(d, 'm');
+    }
+    return duration(d, 'ms');
 }
 
 export function percent(p) {
@@ -89,4 +99,21 @@ export function float(f) {
         return f.toFixed(2);
     }
     return f.toFixed(3);
+}
+
+export function formatBytes(bytes) {
+    if (bytes === 0) {
+        return '0B';
+    }
+
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+
+    if (i === 0) {
+        return bytes + 'B';
+    }
+
+    const value = bytes / Math.pow(k, i);
+    return value.toFixed(1) + sizes[i];
 }

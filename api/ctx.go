@@ -15,8 +15,10 @@ type DataWithContext struct {
 }
 
 type Context struct {
-	Status Status `json:"status"`
-	Search Search `json:"search"`
+	Status    Status                            `json:"status"`
+	Search    Search                            `json:"search"`
+	Incidents map[model.ApplicationCategory]int `json:"incidents"`
+	License   *License                          `json:"license,omitempty"`
 }
 
 type Status struct {
@@ -59,17 +61,49 @@ type Node struct {
 	Status model.Status `json:"status"`
 }
 
+type License struct {
+	Invalid bool   `json:"invalid"`
+	Message string `json:"message"`
+}
+
+type LicenseManager interface {
+	CheckLicense() *License
+}
+
 func (api *Api) WithContext(p *db.Project, cacheStatus *cache.Status, w *model.World, data any) DataWithContext {
-	return DataWithContext{
+	res := DataWithContext{
 		Context: Context{
-			Status: renderStatus(p, cacheStatus, w, api.globalPrometheus),
-			Search: renderSearch(w),
+			Status:    renderStatus(p, cacheStatus, w, api.globalPrometheus),
+			Search:    renderSearch(w),
+			Incidents: renderIncidents(w),
 		},
 		Data: data,
 	}
+	if lm := api.licenseMgr; lm != nil {
+		if l := lm.CheckLicense(); l != nil {
+			res.Context.License = l
+			if l.Invalid {
+				res.Data = nil
+			}
+		}
+	}
+	return res
 }
 
-func renderStatus(p *db.Project, cacheStatus *cache.Status, w *model.World, globalPrometheus *db.IntegrationsPrometheus) Status {
+func renderIncidents(w *model.World) map[model.ApplicationCategory]int {
+	res := map[model.ApplicationCategory]int{}
+	for _, app := range w.Applications {
+		if len(app.Incidents) == 0 {
+			continue
+		}
+		if last := app.Incidents[len(app.Incidents)-1]; !last.Resolved() {
+			res[app.Category]++
+		}
+	}
+	return res
+}
+
+func renderStatus(p *db.Project, cacheStatus *cache.Status, w *model.World, globalPrometheus *db.IntegrationPrometheus) Status {
 	res := Status{
 		Status: model.OK,
 	}
@@ -90,20 +124,17 @@ func renderStatus(p *db.Project, cacheStatus *cache.Status, w *model.World, glob
 	switch {
 	case promCfg.Url == "":
 		res.Prometheus.Status = model.WARNING
-		res.Prometheus.Message = "Prometheus is not configured"
+		res.Prometheus.Message = "Prometheus is not configured."
 		res.Prometheus.Action = "configure"
 	case cacheStatus != nil && cacheStatus.Error != "":
 		res.Prometheus.Status = model.WARNING
-		res.Prometheus.Message = "An error has been occurred while querying Prometheus"
+		res.Prometheus.Message = "An error has been occurred while querying Prometheus:"
 		res.Prometheus.Error = cacheStatus.Error
 		res.Prometheus.Action = "configure"
 	case cacheStatus != nil && cacheStatus.LagMax > 5*refreshInterval:
-		msg := fmt.Sprintf("Prometheus cache is %s behind. (this could be expected after a restart/upgrade)", utils.FormatDuration(cacheStatus.LagAvg, 1))
+		lag := utils.FormatDuration(cacheStatus.LagAvg, 1)
 		res.Prometheus.Status = model.WARNING
-		if w == nil {
-			msg += " Please wait until synchronization is complete."
-		}
-		res.Prometheus.Message = msg
+		res.Prometheus.Message = fmt.Sprintf("The Prometheus cache lag is %s, likely due to a restart or upgrade. Synchronization is in progress.", lag)
 		res.Prometheus.Action = "wait"
 	}
 

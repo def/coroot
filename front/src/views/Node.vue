@@ -1,29 +1,19 @@
 <template>
-    <div>
-        <h1 class="text-h5 ml-4">
-            {{ name }}
-            <v-progress-linear v-if="loading" indeterminate color="green" />
-        </h1>
-
-        <v-alert v-if="error" color="red" icon="mdi-alert-octagon-outline" outlined text>
-            {{ error }}
-        </v-alert>
+    <Views :loading="loading" :error="error">
+        <template v-if="name" #subtitle>{{ name }}</template>
 
         <template v-if="node">
             <div v-if="node.status === 'unknown'" class="text-center">
-                This node is present in the Kubernetes cluster, but it seems that coroot-node-agent is not installed (<a
-                    href="https://coroot.com/docs/metric-exporters/node-agent/installation"
-                    target="_blank"
-                    >docs</a
-                >).
+                This node is present in the Kubernetes cluster, but it seems that coroot-node-agent is not installed.
             </div>
             <Dashboard v-else :name="name" :widgets="node.widgets" class="mt-3" />
         </template>
         <NoData v-else-if="!loading && !error" />
-    </div>
+    </Views>
 </template>
 
 <script>
+import Views from '@/views/Views.vue';
 import Dashboard from '../components/Dashboard';
 import NoData from '../components/NoData';
 
@@ -32,7 +22,7 @@ export default {
         name: String,
     },
 
-    components: { Dashboard, NoData },
+    components: { Views, Dashboard, NoData },
 
     data() {
         return {

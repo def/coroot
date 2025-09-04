@@ -2,6 +2,7 @@ package model
 
 import (
 	"github.com/coroot/coroot/timeseries"
+	"github.com/coroot/coroot/utils"
 )
 
 type ApplicationKind string
@@ -24,6 +25,7 @@ const (
 	ApplicationKindNomadJobGroup      ApplicationKind = "NomadJobGroup"
 	ApplicationKindArgoWorkflow       ApplicationKind = "Workflow"
 	ApplicationKindSparkApplication   ApplicationKind = "SparkApplication"
+	ApplicationKindCustomApplication  ApplicationKind = "CustomApplication"
 )
 
 type Job struct{}
@@ -53,23 +55,24 @@ type StatefulSet struct {
 	ReplicasUpdated *timeseries.TimeSeries
 }
 
-type Service struct {
-	Name      string
-	Namespace string
-	ClusterIP string
+const (
+	ServiceTypeNodePort     = "NodePort"
+	ServiceTypeLoadBalancer = "LoadBalancer"
+)
 
-	Connections []*Connection
+type Service struct {
+	Name            string
+	Namespace       string
+	ClusterIP       string
+	Type            LabelLastValue
+	EndpointIPs     *utils.StringSet
+	LoadBalancerIPs *utils.StringSet
+	DestinationApps map[ApplicationId]*Application
 }
 
 func (svc *Service) GetDestinationApplication() *Application {
-	apps := map[ApplicationId]*Application{}
-	for _, c := range svc.Connections {
-		if c.RemoteInstance != nil {
-			apps[c.RemoteInstance.Owner.Id] = c.RemoteInstance.Owner
-		}
-	}
-	if len(apps) == 1 {
-		for _, app := range apps {
+	if len(svc.DestinationApps) == 1 {
+		for _, app := range svc.DestinationApps {
 			return app
 		}
 	}

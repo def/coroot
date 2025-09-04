@@ -2,10 +2,12 @@ package model
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 
 	"github.com/coroot/coroot/timeseries"
 	"github.com/coroot/coroot/utils"
+	"golang.org/x/exp/maps"
 )
 
 type Application struct {
@@ -14,10 +16,15 @@ type Application struct {
 	Custom   bool
 	Category ApplicationCategory
 
+	Annotations ApplicationAnnotations
+
 	Instances       []*Instance
 	instancesByName map[string][]*Instance
 
-	Downstreams []*Connection
+	Downstreams map[ApplicationId]*AppToAppConnection
+	Upstreams   map[ApplicationId]*AppToAppConnection
+
+	TrafficStats TrafficStats
 
 	DesiredInstances *timeseries.TimeSeries
 
@@ -28,19 +35,30 @@ type Application struct {
 	Deployments []*ApplicationDeployment
 	Incidents   []*ApplicationIncident
 
-	LogMessages map[LogLevel]*LogMessages
+	LogMessages map[Severity]*LogMessages
 
 	Status  Status
 	Reports []*AuditReport
 
 	Settings *ApplicationSettings
+
+	KubernetesServices []*Service
+
+	DNSRequests          map[DNSRequest]map[string]*timeseries.TimeSeries
+	DNSRequestsHistogram map[float32]*timeseries.TimeSeries
 }
 
 func NewApplication(id ApplicationId) *Application {
 	app := &Application{
 		Id:              id,
+		Annotations:     ApplicationAnnotations{},
 		instancesByName: map[string][]*Instance{},
-		LogMessages:     map[LogLevel]*LogMessages{},
+		LogMessages:     map[Severity]*LogMessages{},
+		Upstreams:       map[ApplicationId]*AppToAppConnection{},
+		Downstreams:     map[ApplicationId]*AppToAppConnection{},
+
+		DNSRequests:          map[DNSRequest]map[string]*timeseries.TimeSeries{},
+		DNSRequestsHistogram: map[float32]*timeseries.TimeSeries{},
 	}
 	return app
 }
@@ -207,18 +225,37 @@ func (app *Application) IsPython() bool {
 
 func (app *Application) IsStandalone() bool {
 	for _, d := range app.Downstreams {
-		if d.Instance.Owner != app && !d.IsObsolete() {
+		if d.Application != d.RemoteApplication {
 			return false
 		}
 	}
-	for _, i := range app.Instances {
-		for _, u := range i.Upstreams {
-			if u.RemoteInstance != nil && u.RemoteInstance.Owner != app && !u.IsObsolete() {
-				return false
-			}
+	for _, u := range app.Upstreams {
+		if u.Application != u.RemoteApplication {
+			return false
 		}
 	}
 	return true
+}
+
+func (app *Application) IsDatabase() bool {
+	if app.Id.Kind == ApplicationKindRds || app.Id.Kind == ApplicationKindElasticacheCluster {
+		return true
+	}
+	for t := range app.ApplicationTypes() {
+		if t.IsDatabase() {
+			return true
+		}
+	}
+	return false
+}
+
+func (app *Application) IsQueue() bool {
+	for t := range app.ApplicationTypes() {
+		if t.IsQueue() {
+			return true
+		}
+	}
+	return false
 }
 
 func (app *Application) IsK8s() bool {
@@ -239,25 +276,16 @@ func (app *Application) IsK8s() bool {
 
 func (app *Application) hasClientsInAWS() bool {
 	for _, d := range app.Downstreams {
-		if d.Instance != nil && d.Instance.Node != nil {
-			provider := d.Instance.Node.CloudProvider.Value()
-			if provider == CloudProviderAWS {
-				return true
+		for _, i := range d.Application.Instances {
+			if i.Node != nil {
+				provider := i.Node.CloudProvider.Value()
+				if provider == CloudProviderAWS {
+					return true
+				}
 			}
 		}
 	}
 	return false
-}
-
-func (app *Application) GetClientsConnections() map[ApplicationId][]*Connection {
-	res := map[ApplicationId][]*Connection{}
-	for _, d := range app.Downstreams {
-		if d.Instance.Owner == app {
-			continue
-		}
-		res[d.Instance.Owner.Id] = append(res[d.Instance.Owner.Id], d)
-	}
-	return res
 }
 
 func (app *Application) AddReport(name AuditReportName, widgets ...*Widget) {
@@ -287,6 +315,26 @@ func (app *Application) ApplicationTypes() map[ApplicationType]bool {
 	return res
 }
 
+func (app *Application) ApplicationType() ApplicationType {
+	types := maps.Keys(app.ApplicationTypes())
+	if len(types) == 0 {
+		return ApplicationTypeUnknown
+	}
+
+	if len(types) == 1 {
+		return types[0]
+	}
+	sort.Slice(types, func(i, j int) bool {
+		ti, tj := types[i], types[j]
+		tiw, tjw := ti.Weight(), tj.Weight()
+		if tiw == tjw {
+			return ti < tj
+		}
+		return tiw < tjw
+	})
+	return types[0]
+}
+
 func (app *Application) PeriodicJob() bool {
 	switch app.Id.Kind {
 	case ApplicationKindJob, ApplicationKindCronJob:
@@ -297,6 +345,15 @@ func (app *Application) PeriodicJob() bool {
 			if c.PeriodicSystemdJob {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func (app *Application) IsCorootComponent() bool {
+	for t := range app.ApplicationTypes() {
+		if t.IsCorootComponent() {
+			return true
 		}
 	}
 	return false

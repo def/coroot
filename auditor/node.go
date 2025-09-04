@@ -18,13 +18,14 @@ func AuditNode(w *model.World, node *model.Node) *model.AuditReport {
 
 	report.Status = model.OK
 
+	report.AddWidget(&model.Widget{GroupHeader: "CPU", Width: "100%"})
 	cpuByModeChart(
-		report.GetOrCreateChart("CPU usage, %", model.NewDocLink("inspections", "cpu", "node_usage")),
+		report.GetOrCreateChart("CPU usage, %", model.NewDocLink("inspections", "cpu", "node-cpu-usage")),
 		node.CpuUsageByMode,
 	)
 
 	ncs := getNodeConsumers(node)
-	report.GetOrCreateChart("CPU consumers, cores", model.NewDocLink("inspections", "cpu", "consumers")).
+	report.GetOrCreateChart("CPU consumers, cores", model.NewDocLink("inspections", "cpu", "cpu-consumers")).
 		Stacked().
 		Sorted().
 		SetThreshold("total", node.CpuCapacity).
@@ -34,6 +35,8 @@ func AuditNode(w *model.World, node *model.Node) *model.AuditReport {
 		node.MemoryTotalBytes,
 		timeseries.Sum(node.MemoryCachedBytes, node.MemoryFreeBytes),
 	)
+	report.AddWidget(&model.Widget{GroupHeader: "Memory", Width: "100%"})
+
 	report.
 		GetOrCreateChart("Memory usage, bytes", nil).
 		Stacked().
@@ -42,13 +45,13 @@ func AuditNode(w *model.World, node *model.Node) *model.AuditReport {
 		AddSeries("cache", node.MemoryCachedBytes, "amber").
 		AddSeries("used", used, "red")
 
-	report.GetOrCreateChart("Memory consumers, bytes", model.NewDocLink("inspections", "memory", "consumers")).
+	report.GetOrCreateChart("Memory consumers, bytes", model.NewDocLink("inspections", "memory", "memory-consumers")).
 		Stacked().
 		Sorted().
 		SetThreshold("total", node.MemoryTotalBytes).
 		AddMany(ncs.memory, 5, timeseries.Max)
 
-	netLatency(report, w, node)
+	report.AddWidget(&model.Widget{GroupHeader: "Network", Width: "100%"})
 
 	for _, i := range node.NetInterfaces {
 		report.
@@ -87,6 +90,9 @@ func AuditNode(w *model.World, node *model.Node) *model.AuditReport {
 			vol.Instances.Add(i.Name)
 			vol.PVCs.Add(v.Name.Value())
 		}
+	}
+	if len(volumes) > 0 {
+		report.AddWidget(&model.Widget{GroupHeader: "Disks", Width: "100%"})
 	}
 	disks := report.GetOrCreateTable("Device", "Mount points", "Used by", "Latency", "I/O Load", "Space")
 	ioLatencyChart := report.GetOrCreateChartGroup("Average I/O latency <selector>, seconds", nil)
@@ -151,91 +157,53 @@ func AuditNode(w *model.World, node *model.Node) *model.AuditReport {
 			AddSeries("used", vol.UsedBytes).
 			SetThreshold("total", vol.CapacityBytes)
 	}
+
+	if len(node.GPUs) > 0 {
+		report.AddWidget(&model.Widget{GroupHeader: "GPUs", Width: "100%"})
+	}
+
+	for _, gpu := range node.GPUs {
+		gpus := report.GetOrCreateTable("GPU UUID", "Name", "vRAM")
+		mem := model.NewTableCell()
+		if last := gpu.TotalMemory.Last(); last > 0 {
+			mem.SetValue(humanize.Bytes(uint64(last)))
+		}
+		gpus.AddRow(model.NewTableCell(gpu.UUID), model.NewTableCell(gpu.Name.Value()), mem)
+		report.
+			GetOrCreateChartGroup("GPU utilization <selector>, %", nil).
+			GetOrCreateChart("average").
+			AddSeries(gpu.UUID, gpu.UsageAverage).Feature()
+		report.
+			GetOrCreateChartGroup("GPU utilization <selector>, %", nil).
+			GetOrCreateChart("peak").
+			AddSeries(gpu.UUID, gpu.UsagePeak)
+		report.
+			GetOrCreateChartGroup("GPU Memory utilization <selector>, %", nil).
+			GetOrCreateChart("average").
+			AddSeries(gpu.UUID, gpu.MemoryUsageAverage).Feature()
+		report.
+			GetOrCreateChartGroup("GPU Memory utilization <selector>, %", nil).
+			GetOrCreateChart("peak").
+			AddSeries(gpu.UUID, gpu.MemoryUsagePeak).Feature()
+		coreChart := report.
+			GetOrCreateChartGroup("GPU consumers <selector>, %", nil).
+			GetOrCreateChart(gpu.UUID).Stacked()
+		memChart := report.
+			GetOrCreateChartGroup("GPU memory consumers <selector>, %", nil).
+			GetOrCreateChart(gpu.UUID).Stacked()
+		for _, ci := range gpu.Instances {
+			if u := ci.GPUUsage[gpu.UUID]; u != nil {
+				coreChart.AddSeries(ci.Name, u.UsageAverage)
+				memChart.AddSeries(ci.Name, u.MemoryUsageAverage)
+			}
+		}
+		report.
+			GetOrCreateChart("GPU temperature, ℃", nil).
+			AddSeries(gpu.UUID, gpu.Temperature)
+		report.
+			GetOrCreateChart("GPU power, watts", nil).
+			AddSeries(gpu.UUID, gpu.PowerWatts)
+
+	}
 	return report
-}
-
-func netLatency(report *model.AuditReport, w *model.World, n *model.Node) {
-	zones := map[string]*avgTimeSeries{}
-	nodes := map[string]*avgTimeSeries{}
-
-	srcAZ := nodeAZ(n)
-
-	update := func(m map[string]*avgTimeSeries, k string, rtt *timeseries.TimeSeries) {
-		avg := m[k]
-		if avg == nil {
-			avg = newAvgTimeSeries()
-			m[k] = avg
-		}
-		avg.add(rtt)
-	}
-
-	for _, app := range w.Applications {
-		for _, i := range app.Instances {
-			if i.Node == nil {
-				continue
-			}
-			for _, u := range i.Upstreams {
-				if u.Rtt.IsEmpty() || u.RemoteInstance == nil || u.RemoteInstance.Node == nil {
-					continue
-				}
-				var src, dst *model.Node
-				if i.NodeName() == n.GetName() {
-					src = i.Node
-				} else {
-					dst = i.Node
-				}
-				if u.RemoteInstance.NodeName() == n.GetName() {
-					src = u.RemoteInstance.Node
-				} else {
-					dst = u.RemoteInstance.Node
-				}
-				if src == nil || dst == nil || src.GetName() == dst.GetName() {
-					continue
-				}
-				update(zones, srcAZ+" - "+nodeAZ(dst), u.Rtt)
-				update(nodes, n.GetName()+" - "+dst.GetName(), u.Rtt)
-			}
-		}
-	}
-	if len(nodes) == 0 && len(zones) == 0 {
-		return
-	}
-
-	azChart := report.GetOrCreateChartInGroup("Network RTT between <selector>, seconds", "availability zones", nil)
-	for name, avg := range zones {
-		azChart.AddSeries(name, avg.get())
-	}
-	nodesChart := report.GetOrCreateChartInGroup("Network RTT between <selector>, seconds", "nodes", nil)
-	for name, avg := range nodes {
-		nodesChart.AddSeries(name, avg.get())
-	}
-}
-
-type avgTimeSeries struct {
-	sum   *timeseries.Aggregate
-	count *timeseries.Aggregate
-}
-
-func newAvgTimeSeries() *avgTimeSeries {
-	return &avgTimeSeries{
-		sum:   timeseries.NewAggregate(timeseries.NanSum),
-		count: timeseries.NewAggregate(timeseries.NanSum),
-	}
-}
-
-func (a *avgTimeSeries) add(x *timeseries.TimeSeries) {
-	a.sum.Add(x)
-	a.count.Add(x.Map(timeseries.Defined))
-}
-
-func (a *avgTimeSeries) get() model.SeriesData {
-	return timeseries.Div(a.sum.Get(), a.count.Get())
-}
-
-func nodeAZ(n *model.Node) string {
-	az := n.AvailabilityZone.Value()
-	if az == "" {
-		az = "unspecified"
-	}
-	return az
 }

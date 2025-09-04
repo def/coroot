@@ -9,7 +9,6 @@ import (
 	"github.com/coroot/coroot/timeseries"
 	"github.com/coroot/coroot/utils"
 	"github.com/dustin/go-humanize/english"
-	"golang.org/x/exp/maps"
 )
 
 type ApplicationStatus struct {
@@ -33,7 +32,7 @@ type ApplicationStatus struct {
 }
 
 type ApplicationType struct {
-	Name   model.ApplicationType `json:"name"`
+	Name   string                `json:"name"`
 	Icon   string                `json:"icon"`
 	Report model.AuditReportName `json:"report"`
 	Status model.Status          `json:"status"`
@@ -179,31 +178,26 @@ func renderApplications(w *model.World) []*ApplicationStatus {
 		}
 
 		upstreams := map[model.ApplicationId]bool{}
-		for _, i := range app.Instances {
-			for _, u := range i.Upstreams {
-				upstream := u.RemoteApplication
-				if upstream == nil || u.IsObsolete() {
+		for _, u := range app.Upstreams {
+			upstream := u.RemoteApplication
+			if _, seen := upstreams[u.RemoteApplication.Id]; seen {
+				continue
+			}
+			if app.Id == upstream.Id {
+				continue
+			}
+			if !app.Category.Monitoring() && upstream.Category.Monitoring() {
+				continue
+			}
+			for _, r := range upstream.Reports {
+				if r.Name != model.AuditReportSLO {
 					continue
 				}
-				if _, seen := upstreams[u.RemoteApplication.Id]; seen {
-					continue
-				}
-				if app.Id == upstream.Id {
-					continue
-				}
-				if !app.Category.Monitoring() && upstream.Category.Monitoring() {
-					continue
-				}
-				for _, r := range upstream.Reports {
-					if r.Name != model.AuditReportSLO {
+				for _, ch := range r.Checks {
+					if ch.Status == model.UNKNOWN {
 						continue
 					}
-					for _, ch := range r.Checks {
-						if ch.Status == model.UNKNOWN {
-							continue
-						}
-						upstreams[upstream.Id] = upstreams[upstream.Id] || ch.Status >= model.WARNING
-					}
+					upstreams[upstream.Id] = upstreams[upstream.Id] || ch.Status >= model.WARNING
 				}
 			}
 		}
@@ -306,26 +300,10 @@ func formatPercent(v float32) string {
 }
 
 func getApplicationType(app *model.Application) *ApplicationType {
-	types := maps.Keys(app.ApplicationTypes())
-	if len(types) == 0 {
+	t := app.ApplicationType()
+	if t == model.ApplicationTypeUnknown {
 		return nil
 	}
-
-	var t model.ApplicationType
-	if len(types) == 1 {
-		t = types[0]
-	} else {
-		sort.Slice(types, func(i, j int) bool {
-			ti, tj := types[i], types[j]
-			tiw, tjw := ti.Weight(), tj.Weight()
-			if tiw == tjw {
-				return ti < tj
-			}
-			return tiw < tjw
-		})
-		t = types[0]
-	}
-
 	report := t.AuditReport()
 	hasReport := false
 	var status model.Status
@@ -338,5 +316,5 @@ func getApplicationType(app *model.Application) *ApplicationType {
 	if !hasReport {
 		report = ""
 	}
-	return &ApplicationType{Name: t, Icon: t.Icon(), Report: report, Status: status}
+	return &ApplicationType{Name: t.Name(), Icon: t.Icon(), Report: report, Status: status}
 }

@@ -15,6 +15,8 @@ export default class Api {
     context = {
         status: {},
         search: {},
+        incidents: {},
+        license: {},
     };
 
     constructor(router, vuetify, basePath) {
@@ -50,19 +52,23 @@ export default class Api {
                 if (response.data.context) {
                     this.context.status = response.data.context.status;
                     this.context.search = response.data.context.search;
+                    this.context.incidents = response.data.context.incidents;
+                    this.context.license = response.data.context.license;
                 }
                 try {
-                    cb(response.data.data || response.data, '');
+                    const data = response.data.data !== undefined ? response.data.data : response.data;
+                    cb(data, '', response.status);
                 } catch (e) {
                     console.error(e);
                 }
             })
             .catch((error) => {
+                const status = error.response && error.response.status;
                 const err = error.response && error.response.data && error.response.data.trim();
-                if (error.response && error.response.status === 302) {
+                if (status === 302) {
                     window.location = err;
                 }
-                if (error.response && error.response.status === 401) {
+                if (status === 401) {
                     const r = this.router.currentRoute;
                     const action = err || undefined;
                     if (!r.meta.anonymous || r.query.action !== action) {
@@ -70,7 +76,7 @@ export default class Api {
                         this.router.push({ name: 'login', query: { action, next } }).catch((err) => err);
                     }
                 }
-                cb(null, err || error.message || defaultErrorMessage);
+                cb(null, err || error.message || defaultErrorMessage, status);
             });
     }
 
@@ -132,6 +138,14 @@ export default class Api {
         }
     }
 
+    ai(form, cb) {
+        if (form) {
+            this.post(`ai`, form, cb);
+        } else {
+            this.get(`ai`, {}, cb);
+        }
+    }
+
     getProject(projectId, cb) {
         this.get(`project/${projectId || ''}`, {}, cb);
     }
@@ -153,20 +167,46 @@ export default class Api {
         this.get(this.projectPath(`status`), {}, cb);
     }
 
+    apiKeys(form, cb) {
+        const url = this.projectPath('api_keys');
+        if (form) {
+            this.post(url, form, cb);
+        } else {
+            this.get(url, {}, cb);
+        }
+    }
+
     getOverview(view, query, cb) {
         this.get(this.projectPath(`overview/${view}`), { query }, cb);
+    }
+
+    dashboards(id, form, cb) {
+        let path = this.projectPath(`dashboards`);
+        if (id) {
+            path += '/' + id;
+        }
+        if (form) {
+            this.post(path, form, cb);
+        } else {
+            this.get(path, {}, cb);
+        }
+    }
+
+    panelData(config, cb) {
+        let path = this.projectPath(`panel/data`);
+        this.get(path, { query: JSON.stringify(config) }, cb);
     }
 
     getInspections(cb) {
         this.get(this.projectPath(`inspections`), {}, cb);
     }
 
-    getApplicationCategories(cb) {
-        this.get(this.projectPath(`categories`), {}, cb);
-    }
-
-    saveApplicationCategory(form, cb) {
-        this.post(this.projectPath(`categories`), form, cb);
+    applicationCategories(name, form, cb) {
+        if (form) {
+            this.post(this.projectPath(`application_categories`), form, cb);
+        } else {
+            this.get(this.projectPath(`application_categories`), { name }, cb);
+        }
     }
 
     getCustomApplications(cb) {
@@ -175,6 +215,18 @@ export default class Api {
 
     saveCustomApplication(form, cb) {
         this.post(this.projectPath(`custom_applications`), form, cb);
+    }
+
+    getCustomCloudPricing(cb) {
+        this.get(this.projectPath(`custom_cloud_pricing`), {}, cb);
+    }
+
+    saveCustomCloudPricing(form, cb) {
+        this.post(this.projectPath(`custom_cloud_pricing`), form, cb);
+    }
+
+    deleteCustomCloudPricing(cb) {
+        this.del(this.projectPath(`custom_cloud_pricing`), cb);
     }
 
     getIntegrations(type, cb) {
@@ -197,66 +249,70 @@ export default class Api {
     }
 
     getApplication(appId, cb) {
-        this.get(this.projectPath(`app/${appId}`), {}, cb);
+        this.get(this.projectPath(`app/${encodeURIComponent(appId)}`), {}, cb);
+    }
+
+    getIncidents(limit, cb) {
+        this.get(this.projectPath(`incidents`), { limit }, cb);
     }
 
     getIncident(key, cb) {
         this.get(this.projectPath(`incident/${key}`), {}, cb);
     }
 
-    getRCA(appId, cb) {
-        this.get(this.projectPath(`app/${appId}/rca`), {}, cb);
+    getRCA(appId, withSummary, cb) {
+        this.get(this.projectPath(`app/${encodeURIComponent(appId)}/rca`), { withSummary }, cb);
     }
 
     getInspectionConfig(appId, type, cb) {
-        this.get(this.projectPath(`app/${appId}/inspection/${type}/config`), {}, cb);
+        this.get(this.projectPath(`app/${encodeURIComponent(appId)}/inspection/${type}/config`), {}, cb);
     }
 
     saveInspectionConfig(appId, type, form, cb) {
-        this.post(this.projectPath(`app/${appId}/inspection/${type}/config`), form, cb);
+        this.post(this.projectPath(`app/${encodeURIComponent(appId)}/inspection/${type}/config`), form, cb);
     }
 
     getInstrumentation(appId, type, cb) {
-        this.get(this.projectPath(`app/${appId}/instrumentation/${type}`), {}, cb);
+        this.get(this.projectPath(`app/${encodeURIComponent(appId)}/instrumentation/${type}`), {}, cb);
     }
 
     saveInstrumentationSettings(appId, type, form, cb) {
-        this.post(this.projectPath(`app/${appId}/instrumentation/${type}`), form, cb);
+        this.post(this.projectPath(`app/${encodeURIComponent(appId)}/instrumentation/${type}`), form, cb);
     }
 
     getProfiling(appId, query, cb) {
-        this.get(this.projectPath(`app/${appId}/profiling`), { query }, cb);
+        this.get(this.projectPath(`app/${encodeURIComponent(appId)}/profiling`), { query }, cb);
     }
 
     saveProfilingSettings(appId, form, cb) {
-        this.post(this.projectPath(`app/${appId}/profiling`), form, cb);
+        this.post(this.projectPath(`app/${encodeURIComponent(appId)}/profiling`), form, cb);
     }
 
     getTracing(appId, trace, cb) {
-        this.get(this.projectPath(`app/${appId}/tracing`), { trace }, cb);
+        this.get(this.projectPath(`app/${encodeURIComponent(appId)}/tracing`), { trace }, cb);
     }
 
     saveTracingSettings(appId, form, cb) {
-        this.post(this.projectPath(`app/${appId}/tracing`), form, cb);
+        this.post(this.projectPath(`app/${encodeURIComponent(appId)}/tracing`), form, cb);
     }
 
     getLogs(appId, query, cb) {
-        this.get(this.projectPath(`app/${appId}/logs`), { query }, cb);
+        this.get(this.projectPath(`app/${encodeURIComponent(appId)}/logs`), { query }, cb);
     }
 
     saveLogsSettings(appId, form, cb) {
-        this.post(this.projectPath(`app/${appId}/logs`), form, cb);
+        this.post(this.projectPath(`app/${encodeURIComponent(appId)}/logs`), form, cb);
     }
 
     getNode(nodeName, cb) {
-        this.get(this.projectPath(`node/${nodeName}`), {}, cb);
+        this.get(this.projectPath(`node/${encodeURIComponent(nodeName)}`), {}, cb);
     }
 
-    getPrometheusCompleteConfiguration() {
-        return {
-            remote: {
-                apiPrefix: this.basePath + 'api/' + this.projectPath('prom') + '/api/v1',
-            },
-        };
+    risks(appId, form, cb) {
+        this.post(this.projectPath(`app/${encodeURIComponent(appId)}/risks`), form, cb);
+    }
+
+    prom() {
+        return this.basePath + 'api/' + this.projectPath('prom');
     }
 }

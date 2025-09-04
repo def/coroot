@@ -105,15 +105,6 @@ export default {
         show() {
             return this.rates.root > (this.limit || 0);
         },
-        width() {
-            if (this.zoom === false) {
-                return '0';
-            }
-            if (this.zoom === true) {
-                return '100%';
-            }
-            return this.rates.parent + '%';
-        },
         style() {
             switch (this.zoom) {
                 case false:
@@ -121,7 +112,7 @@ export default {
                 case true:
                     return { display: 'block', width: '100%' };
                 default:
-                    return { display: 'block', width: this.rates.parent + '%' };
+                    return { display: 'block', width: Math.min(this.rates.parent, 100) + '%' };
             }
         },
         color() {
@@ -137,12 +128,7 @@ export default {
             if (this.node.color_by) {
                 return palette.hash2(this.node.color_by);
             }
-            let name = this.node.name;
-            const i = name.lastIndexOf('/');
-            if (i > 0) {
-                name = name.substr(0, i);
-            }
-            return palette.hash2(name);
+            return palette.hash2(this.node.name);
         },
     },
 
@@ -259,6 +245,7 @@ export default {
     justify-content: flex-end;
 }
 .details {
+    max-width: 600px;
     font-size: 12px;
 }
 .details .comparison .percent {

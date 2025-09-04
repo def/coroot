@@ -1,6 +1,7 @@
 package watchers
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"sort"
@@ -95,12 +96,18 @@ func (w *Deployments) snapshotDeploymentMetrics(project *db.Project, world *mode
 
 func (w *Deployments) sendNotifications(project *db.Project, world *model.World) {
 	integrations := project.Settings.Integrations
-	categorySettings := project.Settings.ApplicationCategorySettings
 	now := world.Ctx.To
+	categories := project.GetApplicationCategories()
 	for _, app := range world.Applications {
-		if !categorySettings[app.Category].NotifyOfDeployments {
+		categorySettings := categories[app.Category]
+		if categorySettings == nil {
 			continue
 		}
+		notificationSettings := categorySettings.NotificationSettings.Deployments
+		if !notificationSettings.Enabled {
+			continue
+		}
+
 		for _, ds := range model.CalcApplicationDeploymentStatuses(app, world.CheckConfigs, now) {
 			d := ds.Deployment
 			if now.Sub(d.StartedAt) > timeseries.Day {
@@ -113,8 +120,8 @@ func (w *Deployments) sendNotifications(project *db.Project, world *model.World)
 				continue
 			}
 			needSave := false
-			if cfg := integrations.Slack; cfg != nil && cfg.Deployments && d.Notifications.Slack.State < ds.State {
-				client := notifications.NewSlack(cfg.Token, cfg.DefaultChannel)
+			if slack := integrations.Slack; slack != nil && slack.Deployments && notificationSettings.Slack != nil && notificationSettings.Slack.Enabled && d.Notifications.Slack.State < ds.State {
+				client := notifications.NewSlack(slack.Token, cmp.Or(notificationSettings.Slack.Channel, slack.DefaultChannel))
 				ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
 				err := client.SendDeployment(ctx, project, ds)
 				cancel()
@@ -125,8 +132,8 @@ func (w *Deployments) sendNotifications(project *db.Project, world *model.World)
 					needSave = true
 				}
 			}
-			if cfg := integrations.Teams; cfg != nil && cfg.Deployments && d.Notifications.Teams.State < ds.State {
-				client := notifications.NewTeams(cfg.WebhookUrl)
+			if teams := integrations.Teams; teams != nil && teams.Deployments && notificationSettings.Teams != nil && notificationSettings.Teams.Enabled && d.Notifications.Teams.State < ds.State {
+				client := notifications.NewTeams(teams.WebhookUrl)
 				ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
 				err := client.SendDeployment(ctx, project, ds)
 				cancel()
@@ -137,8 +144,8 @@ func (w *Deployments) sendNotifications(project *db.Project, world *model.World)
 					needSave = true
 				}
 			}
-			if cfg := integrations.Webhook; cfg != nil && cfg.Deployments && d.Notifications.Webhook.State < ds.State {
-				client := notifications.NewWebhook(cfg)
+			if webhook := integrations.Webhook; webhook != nil && webhook.Deployments && notificationSettings.Webhook != nil && notificationSettings.Webhook.Enabled && d.Notifications.Webhook.State < ds.State {
+				client := notifications.NewWebhook(webhook)
 				ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
 				err := client.SendDeployment(ctx, project, ds)
 				cancel()
@@ -299,9 +306,9 @@ func calcMetricsSnapshot(app *model.Application, from, to timeseries.Time, step 
 
 	for level, msgs := range app.LogMessages {
 		switch level {
-		case model.LogLevelCritical, model.LogLevelError:
+		case model.SeverityError, model.SeverityFatal:
 			logErrors.Add(msgs.Messages)
-		case model.LogLevelWarning:
+		case model.SeverityWarning:
 			logWarnings.Add(msgs.Messages)
 		}
 	}

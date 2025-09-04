@@ -32,7 +32,7 @@ Next, install the Coroot Operator:
 helm install -n coroot --create-namespace coroot-operator coroot/coroot-operator
 ```
 
-Install the Coroot Enterprise Edition:
+Install the Coroot Enterprise Edition. This chart creates a minimal [Coroot Custom Resource](/installation/k8s-operator):
 
 ```bash
 helm install -n coroot coroot coroot/coroot-ee \
@@ -53,7 +53,7 @@ To deploy Coroot using Docker Compose, run the following command.
 Before applying it, you can review the configuration file in Coroot's GitHub repository: docker-compose.yaml
 
 ```bash
-curl -fsS https://raw.githubusercontent.com/coroot/coroot-ee/main/deploy/docker-compose.yaml | \
+curl -fsS https://raw.githubusercontent.com/coroot/coroot/main/deploy/docker-compose.yaml | \
   LICENSE_KEY="COROOT-LICENSE-KEY-HERE" docker compose -f - up -d
 ```
 
@@ -68,8 +68,8 @@ Deploy the Coroot stack to your cluster by running the following command on the 
 Before applying, you can review the configuration file in Coroot's GitHub repository: docker-swarm-stack.yaml
 
 ```bash
-curl -fsS https://raw.githubusercontent.com/coroot/coroot-ee/main/deploy/docker-swarm-stack.yaml | \
-  LICENSE_KEY="COROOT-LICENSE-KEY-HERE" docker stack deploy -c - coroot-ee
+curl -fsS https://raw.githubusercontent.com/coroot/coroot/main/deploy/docker-swarm-stack.yaml | \
+  LICENSE_KEY="COROOT-LICENSE-KEY-HERE" docker stack deploy -c - coroot
 ```
 
 Since Docker Swarm doesn't support privileged containers, you'll have to manually deploy coroot-node-agent on each cluster node. 
@@ -92,12 +92,12 @@ Access Coroot through any node in your Docker Swarm cluster using its published 
   <TabItem value="ubuntu" label="Ubuntu & Debian">
 
 Coroot requires a Prometheus server with the Remote Write Receiver enabled, along with a ClickHouse server. 
-For detailed steps on installing all the necessary components on an Ubuntu/Debian node, refer to the full instructions.
+For detailed steps on installing all the necessary components on an Ubuntu/Debian node, refer to the [full instructions](/installation/ubuntu?edition=ee).
 
 To install Coroot, run the following command:
 
 ```bash
-curl -sfL https://raw.githubusercontent.com/coroot/coroot-ee/main/deploy/install.sh | \
+curl -sfL https://raw.githubusercontent.com/coroot/coroot/main/deploy/install.sh | \
   LICENSE_KEY="COROOT-LICENSE-KEY-HERE" \
   BOOTSTRAP_PROMETHEUS_URL="http://127.0.0.1:9090" \
   BOOTSTRAP_REFRESH_INTERVAL=15s \
@@ -118,12 +118,12 @@ Access Coroot at: http://COROOT_NODE_IP:8080.
 <TabItem value="rhel" label="RHEL & CentOS">
 
 Coroot requires a Prometheus server with the Remote Write Receiver enabled, along with a ClickHouse server. 
-For detailed steps on installing all the necessary components on an Ubuntu/Debian node, refer to the full instructions.
+For detailed steps on installing all the necessary components on an Ubuntu/Debian node, refer to the [full instructions](/installation/rhel?edition=ee).
 
 To install Coroot, run the following command:
 
 ```bash
-curl -sfL https://raw.githubusercontent.com/coroot/coroot-ee/main/deploy/install.sh | \
+curl -sfL https://raw.githubusercontent.com/coroot/coroot/main/deploy/install.sh | \
   LICENSE_KEY="COROOT-LICENSE-KEY-HERE" \
   BOOTSTRAP_PROMETHEUS_URL="http://127.0.0.1:9090" \
   BOOTSTRAP_REFRESH_INTERVAL=15s \

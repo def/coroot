@@ -6,6 +6,8 @@ type ApplicationSettings struct {
 	Logs      *ApplicationSettingsLogs      `json:"logs,omitempty"`
 
 	Instrumentation map[ApplicationType]*ApplicationInstrumentation `json:"instrumentation,omitempty"`
+
+	RiskOverrides []RiskOverride `json:"risk_overrides,omitempty"`
 }
 
 type ApplicationSettingsProfiling struct {
@@ -22,11 +24,10 @@ type ApplicationSettingsLogs struct {
 
 type ApplicationInstrumentation struct {
 	Type        ApplicationType   `json:"type"`
-	Host        string            `json:"host,omitempty"`
 	Port        string            `json:"port"`
 	Credentials Credentials       `json:"credentials"`
 	Params      map[string]string `json:"params"`
-	Disabled    bool              `json:"disabled"`
+	Enabled     *bool             `json:"enabled"`
 }
 
 type Credentials struct {

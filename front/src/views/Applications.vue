@@ -1,12 +1,6 @@
 <template>
-    <div>
-        <v-progress-linear indeterminate v-if="loading" color="green" />
-
-        <v-alert v-if="error" color="red" icon="mdi-alert-octagon-outline" outlined text>
-            {{ error }}
-        </v-alert>
-
-        <ApplicationFilter :applications="applications" @filter="setFilter" class="my-4" />
+    <Views :loading="loading" :error="error">
+        <ApplicationFilter :applications="applications" @filter="setFilter" class="mb-4" />
 
         <div class="legend mb-3">
             <div v-for="s in statuses" class="item">
@@ -51,14 +45,8 @@
             </template>
             <template #item.type="{ item: { id, type } }">
                 <div v-if="type" class="d-flex align-center">
-                    <img
-                        v-if="type.icon"
-                        :src="`${$coroot.base_path}static/img/tech-icons/${type.icon}.svg`"
-                        onerror="this.style.display='none'"
-                        height="16"
-                        width="16"
-                        class="icon"
-                    />
+                    <AppIcon :icon="type.icon" class="mr-1" />
+
                     <router-link v-if="type.report" :to="link(id, type.report)" class="type" :class="type.status">
                         {{ type.name }}
                     </router-link>
@@ -116,11 +104,13 @@
                 </router-link>
             </template>
         </v-data-table>
-    </div>
+    </Views>
 </template>
 
 <script>
 import ApplicationFilter from '../components/ApplicationFilter.vue';
+import AppIcon from '../components/AppIcon.vue';
+import Views from '@/views/Views.vue';
 
 const statuses = {
     critical: { name: 'SLO violation', color: 'red lighten-1' },
@@ -131,7 +121,7 @@ const statuses = {
 };
 
 export default {
-    components: { ApplicationFilter },
+    components: { Views, ApplicationFilter, AppIcon },
 
     data() {
         return {
@@ -216,6 +206,9 @@ export default {
 .table:deep(tr:hover) {
     background-color: unset !important;
 }
+.table:deep(th) {
+    white-space: nowrap;
+}
 .table:deep(th),
 .table:deep(td) {
     padding: 4px 8px !important;
@@ -259,10 +252,6 @@ export default {
     padding: 0 !important;
 }
 
-.icon {
-    margin-right: 4px;
-    opacity: 80%;
-}
 .type {
     opacity: 60%;
     white-space: nowrap;

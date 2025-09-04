@@ -7,7 +7,7 @@ import (
 	"github.com/coroot/coroot/timeseries"
 )
 
-func loadElasticacheMetadata(w *model.World, metrics map[string][]model.MetricValues, pjs promJobStatuses, ecInstancesById map[string]*model.Instance) {
+func loadElasticacheMetadata(w *model.World, metrics map[string][]*model.MetricValues, pjs promJobStatuses, ecInstancesById map[string]*model.Instance) {
 	for _, m := range metrics["aws_elasticache_info"] {
 		ecId := m.Labels["ec_instance_id"]
 		if ecId == "" {
@@ -43,12 +43,12 @@ func loadElasticacheMetadata(w *model.World, metrics map[string][]model.MetricVa
 	}
 }
 
-func (c *Constructor) loadElasticache(w *model.World, metrics map[string][]model.MetricValues, pjs promJobStatuses, ecInstancesById map[string]*model.Instance) {
-	for queryName := range QUERIES {
-		if !strings.HasPrefix(queryName, "aws_elasticache_") || queryName == "aws_elasticache_info" {
+func (c *Constructor) loadElasticache(w *model.World, metrics map[string][]*model.MetricValues, pjs promJobStatuses, ecInstancesById map[string]*model.Instance) {
+	for _, q := range QUERIES {
+		if !strings.HasPrefix(q.Name, "aws_elasticache_") {
 			continue
 		}
-		for _, m := range metrics[queryName] {
+		for _, m := range metrics[q.Name] {
 			ecId := m.Labels["ec_instance_id"]
 			if ecId == "" {
 				continue
@@ -57,7 +57,7 @@ func (c *Constructor) loadElasticache(w *model.World, metrics map[string][]model
 			if instance == nil {
 				continue
 			}
-			switch queryName {
+			switch q.Name {
 			case "aws_elasticache_status":
 				instance.Elasticache.LifeSpan = merge(instance.Elasticache.LifeSpan, m.Values, timeseries.Any)
 				instance.Elasticache.Status.Update(m.Values, m.Labels["status"])
@@ -66,7 +66,7 @@ func (c *Constructor) loadElasticache(w *model.World, metrics map[string][]model
 	}
 	if c.pricing != nil {
 		for _, instance := range ecInstancesById {
-			instance.Node.Price = c.pricing.GetNodePrice(instance.Node)
+			instance.Node.Price = c.pricing.GetNodePrice(nil, instance.Node)
 		}
 	}
 }

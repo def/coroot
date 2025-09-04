@@ -2,10 +2,14 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"slices"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/coroot/coroot/api/forms"
@@ -23,6 +27,7 @@ import (
 	"github.com/coroot/coroot/timeseries"
 	"github.com/coroot/coroot/utils"
 	"github.com/gorilla/mux"
+	"golang.org/x/exp/maps"
 	"k8s.io/klog"
 )
 
@@ -33,14 +38,19 @@ type Api struct {
 	pricing          *pricing.Manager
 	roles            rbac.RoleManager
 	globalClickHouse *db.IntegrationClickhouse
-	globalPrometheus *db.IntegrationsPrometheus
+	globalPrometheus *db.IntegrationPrometheus
+	licenseMgr       LicenseManager
 
 	authSecret        string
 	authAnonymousRole rbac.RoleName
+
+	deploymentUuid string
+	instanceUuid   string
 }
 
-func NewApi(cache *cache.Cache, db *db.DB, collector *collector.Collector, pricing *pricing.Manager, roles rbac.RoleManager,
-	globalClickHouse *db.IntegrationClickhouse, globalPrometheus *db.IntegrationsPrometheus) *Api {
+func NewApi(cache *cache.Cache, db *db.DB, collector *collector.Collector, pricing *pricing.Manager, roles rbac.RoleManager, licenseMgr LicenseManager,
+	globalClickHouse *db.IntegrationClickhouse, globalPrometheus *db.IntegrationPrometheus,
+	deploymentUuid, instanceUuid string) *Api {
 	return &Api{
 		cache:            cache,
 		db:               db,
@@ -49,6 +59,9 @@ func NewApi(cache *cache.Cache, db *db.DB, collector *collector.Collector, prici
 		roles:            roles,
 		globalClickHouse: globalClickHouse,
 		globalPrometheus: globalPrometheus,
+		licenseMgr:       licenseMgr,
+		deploymentUuid:   deploymentUuid,
+		instanceUuid:     instanceUuid,
 	}
 }
 
@@ -80,38 +93,14 @@ func (api *Api) User(w http.ResponseWriter, r *http.Request, u *db.User) {
 		return
 	}
 
-	type Project struct {
-		Id   db.ProjectId `json:"id"`
-		Name string       `json:"name"`
-	}
-	type User struct {
-		Name      string        `json:"name"`
-		Email     string        `json:"email"`
-		Role      rbac.RoleName `json:"role"`
-		Anonymous bool          `json:"anonymous"`
-		Projects  []Project     `json:"projects"`
-	}
-	res := User{
-		Name:      u.Name,
-		Email:     u.Email,
-		Anonymous: u.Anonymous,
-	}
-	if len(u.Roles) > 0 {
-		res.Role = u.Roles[0]
-	}
 	projects, err := api.db.GetProjectNames()
 	if err != nil {
 		klog.Errorln("failed to get projects:", err)
 		http.Error(w, "", http.StatusInternalServerError)
 		return
 	}
-	for id, name := range projects {
-		res.Projects = append(res.Projects, Project{Id: id, Name: name})
-	}
-	sort.Slice(res.Projects, func(i, j int) bool {
-		return res.Projects[i].Name < res.Projects[j].Name
-	})
-	utils.WriteJson(w, res)
+	viewonly := !api.IsAllowed(u, rbac.Actions.Project("*").Settings().Edit())
+	utils.WriteJson(w, views.User(u, projects, viewonly))
 }
 
 func (api *Api) Users(w http.ResponseWriter, r *http.Request, u *db.User) {
@@ -193,6 +182,7 @@ func (api *Api) Roles(w http.ResponseWriter, r *http.Request, u *db.User) {
 		rbac.NewPermission(rbac.ScopeProjectInstrumentations, rbac.ActionEdit, nil),
 		rbac.NewPermission(rbac.ScopeApplication, rbac.ActionView, rbac.Object{"application_category": "databases"}),
 		rbac.NewPermission(rbac.ScopeNode, rbac.ActionView, rbac.Object{"node_name": "db*"}),
+		rbac.NewPermission(rbac.ScopeDashboard, rbac.ActionView, rbac.Object{"dashboard_name": "db*"}),
 	)
 	roles, err := api.roles.GetRoles()
 	if err != nil {
@@ -222,6 +212,13 @@ func (api *Api) SSO(w http.ResponseWriter, r *http.Request, u *db.User) {
 	utils.WriteJson(w, res)
 }
 
+func (api *Api) AI(w http.ResponseWriter, r *http.Request, u *db.User) {
+	res := struct {
+		Provider string `json:"provider"`
+	}{}
+	utils.WriteJson(w, res)
+}
+
 func (api *Api) Project(w http.ResponseWriter, r *http.Request, u *db.User) {
 	vars := mux.Vars(r)
 	projectId := vars["project"]
@@ -232,8 +229,9 @@ func (api *Api) Project(w http.ResponseWriter, r *http.Request, u *db.User) {
 
 	case http.MethodGet:
 		type ProjectSettings struct {
+			Readonly        bool                `json:"readonly"`
 			Name            string              `json:"name"`
-			ApiKey          string              `json:"api_key"`
+			ApiKeys         any                 `json:"api_keys"`
 			RefreshInterval timeseries.Duration `json:"refresh_interval"`
 		}
 		res := ProjectSettings{}
@@ -248,10 +246,14 @@ func (api *Api) Project(w http.ResponseWriter, r *http.Request, u *db.User) {
 				http.Error(w, "", http.StatusInternalServerError)
 				return
 			}
+			prometheusCfg := project.PrometheusConfig(api.globalPrometheus)
+			res.Readonly = project.Settings.Readonly
 			res.Name = project.Name
+			res.RefreshInterval = prometheusCfg.RefreshInterval
 			if isAllowed {
-				res.ApiKey = string(project.Id)
-				res.RefreshInterval = project.Prometheus.RefreshInterval
+				res.ApiKeys = project.Settings.ApiKeys
+			} else {
+				res.ApiKeys = "permission denied"
 			}
 		}
 		utils.WriteJson(w, res)
@@ -267,11 +269,13 @@ func (api *Api) Project(w http.ResponseWriter, r *http.Request, u *db.User) {
 			http.Error(w, "", http.StatusBadRequest)
 			return
 		}
-		project := db.Project{
+		isNew := projectId == ""
+		project := &db.Project{
 			Id:   db.ProjectId(projectId),
 			Name: form.Name,
 		}
-		id, err := api.db.SaveProject(project)
+		project.Settings.Readonly = false
+		err := api.db.SaveProject(project)
 		if err != nil {
 			if errors.Is(err, db.ErrConflict) {
 				http.Error(w, "This project name is already being used.", http.StatusConflict)
@@ -281,7 +285,15 @@ func (api *Api) Project(w http.ResponseWriter, r *http.Request, u *db.User) {
 			http.Error(w, "", http.StatusInternalServerError)
 			return
 		}
-		http.Error(w, string(id), http.StatusOK)
+		if isNew && api.globalClickHouse != nil {
+			err = api.collector.MigrateClickhouseDatabase(r.Context(), project)
+			if err != nil {
+				klog.Errorln("failed to migrate clickhouse database:", err)
+				http.Error(w, "Failed to create or update clickhouse database", http.StatusInternalServerError)
+				return
+			}
+		}
+		http.Error(w, string(project.Id), http.StatusOK)
 
 	case http.MethodDelete:
 		if !isAllowed {
@@ -334,9 +346,19 @@ func (api *Api) Overview(w http.ResponseWriter, r *http.Request, u *db.User) {
 			http.Error(w, "You are not allowed to view traces.", http.StatusForbidden)
 			return
 		}
+	case "logs":
+		if !api.IsAllowed(u, rbac.Actions.Project(projectId).Logs().View()) {
+			http.Error(w, "You are not allowed to view logs.", http.StatusForbidden)
+			return
+		}
 	case "costs":
 		if !api.IsAllowed(u, rbac.Actions.Project(projectId).Costs().View()) {
 			http.Error(w, "You are not allowed to view costs.", http.StatusForbidden)
+			return
+		}
+	case "risks":
+		if !api.IsAllowed(u, rbac.Actions.Project(projectId).Risks().View()) {
+			http.Error(w, "You are not allowed to view risks.", http.StatusForbidden)
 			return
 		}
 	}
@@ -352,11 +374,201 @@ func (api *Api) Overview(w http.ResponseWriter, r *http.Request, u *db.User) {
 		return
 	}
 	var ch *clickhouse.Client
-	if ch, err = api.getClickhouseClient(project); err != nil {
+	if ch, err = api.GetClickhouseClient(project); err != nil {
 		klog.Warningln(err)
 	}
-	auditor.Audit(world, project, nil, project.ClickHouseConfig(api.globalClickHouse) != nil)
-	utils.WriteJson(w, api.WithContext(project, cacheStatus, world, views.Overview(r.Context(), ch, world, view, r.URL.Query().Get("query"))))
+	defer ch.Close()
+	auditor.Audit(world, project, nil, project.ClickHouseConfig(api.globalClickHouse) != nil, nil)
+	utils.WriteJson(w, api.WithContext(project, cacheStatus, world, views.Overview(r.Context(), ch, project, world, view, r.URL.Query().Get("query"))))
+}
+
+func (api *Api) Dashboards(w http.ResponseWriter, r *http.Request, u *db.User) {
+	world, project, cacheStatus, err := api.LoadWorldByRequest(r)
+	if err != nil {
+		klog.Errorln(err)
+		http.Error(w, "", http.StatusInternalServerError)
+		return
+	}
+	if project == nil || world == nil {
+		utils.WriteJson(w, api.WithContext(project, cacheStatus, world, nil))
+		return
+	}
+
+	vars := mux.Vars(r)
+	id := vars["dashboard"]
+
+	if r.Method == http.MethodPost {
+		if !api.IsAllowed(u, rbac.Actions.Project(string(project.Id)).Dashboards().Edit()) {
+			http.Error(w, "You are not allowed to configure dashboards.", http.StatusForbidden)
+			return
+		}
+		var form forms.DashboardForm
+		if err = forms.ReadAndValidate(r, &form); err != nil {
+			klog.Warningln("bad request:", err)
+			http.Error(w, "", http.StatusBadRequest)
+			return
+		}
+		switch form.Action {
+		case "create":
+			id, err = api.db.CreateDashboard(project.Id, form.Name, form.Description)
+			if err == nil {
+				http.Error(w, id, http.StatusCreated)
+				return
+			}
+		case "update":
+			err = api.db.UpdateDashboard(project.Id, id, form.Name, form.Description)
+		case "delete":
+			err = api.db.DeleteDashboard(project.Id, id)
+		default:
+			err = api.db.SaveDashboardConfig(project.Id, id, form.Dashboard.Config)
+		}
+		if err != nil {
+			klog.Errorf("failed to %s dashboard: %s", form.Action, err)
+			http.Error(w, "", http.StatusInternalServerError)
+			return
+		}
+		return
+	}
+
+	auditor.Audit(world, project, nil, project.ClickHouseConfig(api.globalClickHouse) != nil, nil)
+
+	if id != "" {
+		dashboard, err := api.db.GetDashboard(project.Id, id)
+		if err != nil {
+			if errors.Is(err, db.ErrNotFound) {
+				klog.Warningln("dashboard not found:", id)
+				http.Error(w, "Dashboard not found", http.StatusNotFound)
+				return
+			}
+			klog.Errorln(err)
+			http.Error(w, "", http.StatusInternalServerError)
+			return
+		}
+		if !api.IsAllowed(u, rbac.Actions.Project(string(project.Id)).Dashboard(dashboard.Name).View()) {
+			http.Error(w, "You are not allowed to view this dashboard.", http.StatusForbidden)
+			return
+		}
+		utils.WriteJson(w, api.WithContext(project, cacheStatus, world, views.Dashboards.Dashboard(dashboard)))
+		return
+	}
+
+	dashboards, err := api.db.GetDashboards(project.Id)
+	if err != nil {
+		klog.Errorln(err)
+		http.Error(w, "", http.StatusInternalServerError)
+		return
+	}
+	utils.WriteJson(w, api.WithContext(project, cacheStatus, world, views.Dashboards.List(dashboards)))
+}
+
+func (api *Api) PanelData(w http.ResponseWriter, r *http.Request, u *db.User) {
+	projectId := db.ProjectId(mux.Vars(r)["project"])
+	project, err := api.db.GetProject(projectId)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			klog.Warningln("project not found:", projectId)
+			http.Error(w, "Project not found", http.StatusNotFound)
+			return
+		}
+		klog.Errorln(err)
+		http.Error(w, "", http.StatusInternalServerError)
+		return
+	}
+
+	query := r.URL.Query().Get("query")
+	var config db.DashboardPanel
+	err = json.Unmarshal([]byte(query), &config)
+	if err != nil {
+		klog.Warningln("invalid query:", query)
+		http.Error(w, "Invalid query", http.StatusBadRequest)
+		return
+	}
+
+	promConfig := project.PrometheusConfig(api.globalPrometheus)
+	cfg := prom.NewClientConfig(promConfig.Url, promConfig.RefreshInterval)
+	cfg.BasicAuth = promConfig.BasicAuth
+	cfg.TlsSkipVerify = promConfig.TlsSkipVerify
+	cfg.ExtraSelector = promConfig.ExtraSelector
+	cfg.CustomHeaders = promConfig.CustomHeaders
+	promClient, err := prom.NewClient(cfg)
+	if err != nil {
+		klog.Errorln(err)
+		http.Error(w, "", http.StatusInternalServerError)
+		return
+	}
+	from, to, _ := api.getTimeContext(r)
+	step := increaseStepForBigDurations(from, to, promConfig.RefreshInterval)
+	data, err := views.Dashboards.PanelData(r.Context(), promClient, config, from, to, step)
+	if err != nil {
+		klog.Errorln(err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	utils.WriteJson(w, data)
+}
+
+func (api *Api) ApiKeys(w http.ResponseWriter, r *http.Request, u *db.User) {
+	vars := mux.Vars(r)
+	projectId := vars["project"]
+
+	project, err := api.db.GetProject(db.ProjectId(projectId))
+	if err != nil {
+		klog.Errorln("failed to get project:", err)
+		http.Error(w, "", http.StatusInternalServerError)
+		return
+	}
+
+	isAllowed := api.IsAllowed(u, rbac.Actions.Project(projectId).Settings().Edit())
+
+	if r.Method == http.MethodGet {
+		res := struct {
+			Editable bool        `json:"editable"`
+			Keys     []db.ApiKey `json:"keys"`
+		}{
+			Editable: isAllowed && !project.Settings.Readonly,
+			Keys:     project.Settings.ApiKeys,
+		}
+		if !isAllowed {
+			for i := range res.Keys {
+				res.Keys[i].Key = ""
+			}
+		}
+		utils.WriteJson(w, res)
+		return
+	}
+
+	if !isAllowed {
+		http.Error(w, "You are not allowed to configure API keys.", http.StatusForbidden)
+		return
+	}
+	var form forms.ApiKeyForm
+	if err = forms.ReadAndValidate(r, &form); err != nil {
+		klog.Warningln("bad request:", err)
+		http.Error(w, "", http.StatusBadRequest)
+		return
+	}
+	switch form.Action {
+	case "generate":
+		form.Key = utils.RandomString(32)
+		project.Settings.ApiKeys = append(project.Settings.ApiKeys, form.ApiKey)
+	case "delete":
+		project.Settings.ApiKeys = slices.DeleteFunc(project.Settings.ApiKeys, func(k db.ApiKey) bool {
+			return k.Key == form.Key
+		})
+	case "edit":
+		for i, k := range project.Settings.ApiKeys {
+			if k.Key == form.Key {
+				project.Settings.ApiKeys[i].Description = form.Description
+			}
+		}
+	default:
+		return
+	}
+	if err = api.db.SaveProjectSettings(project); err != nil {
+		klog.Errorln("failed to save project api keys:", err)
+		http.Error(w, "", http.StatusInternalServerError)
+		return
+	}
 }
 
 func (api *Api) Inspections(w http.ResponseWriter, r *http.Request, u *db.User) {
@@ -371,22 +583,50 @@ func (api *Api) Inspections(w http.ResponseWriter, r *http.Request, u *db.User) 
 	utils.WriteJson(w, views.Inspections(checkConfigs))
 }
 
-func (api *Api) Categories(w http.ResponseWriter, r *http.Request, u *db.User) {
+func (api *Api) ApplicationCategories(w http.ResponseWriter, r *http.Request, u *db.User) {
 	vars := mux.Vars(r)
 	projectId := vars["project"]
+
+	project, err := api.db.GetProject(db.ProjectId(projectId))
+	if err != nil {
+		klog.Errorln(err)
+		http.Error(w, "", http.StatusInternalServerError)
+		return
+	}
 
 	if r.Method == http.MethodPost {
 		if !api.IsAllowed(u, rbac.Actions.Project(projectId).ApplicationCategories().Edit()) {
 			http.Error(w, "You are not allowed to configure application categories.", http.StatusForbidden)
 			return
 		}
+		if project.Settings.Readonly {
+			http.Error(w, "This project is defined through the config and cannot be modified via the UI.", http.StatusForbidden)
+			return
+		}
 		var form forms.ApplicationCategoryForm
-		if err := forms.ReadAndValidate(r, &form); err != nil {
+		if err = forms.ReadAndValidate(r, &form); err != nil {
 			klog.Warningln("bad request:", err)
 			http.Error(w, "Invalid name or patterns", http.StatusBadRequest)
 			return
 		}
-		if err := api.db.SaveApplicationCategory(db.ProjectId(projectId), form.Name, form.NewName, form.CustomPatterns, form.NotifyOfDeployments); err != nil {
+		var category *db.ApplicationCategory
+		switch form.Action {
+		case "test":
+			err = form.SendTestNotification(r.Context(), project)
+			if err != nil {
+				klog.Warningln("failed to send test notification:", err)
+				http.Error(w, err.Error(), http.StatusBadRequest)
+			}
+			return
+		case "delete":
+		default:
+			category = &form.ApplicationCategory
+		}
+		if err = api.db.SaveApplicationCategory(project, form.Id, category); err != nil {
+			if errors.Is(err, db.ErrConflict) {
+				http.Error(w, "Application category already exists.", http.StatusConflict)
+				return
+			}
 			klog.Errorln("failed to save:", err)
 			http.Error(w, "", http.StatusInternalServerError)
 			return
@@ -394,44 +634,107 @@ func (api *Api) Categories(w http.ResponseWriter, r *http.Request, u *db.User) {
 		return
 	}
 
-	p, err := api.db.GetProject(db.ProjectId(projectId))
-	if err != nil {
-		klog.Errorln(err)
-		http.Error(w, "", http.StatusInternalServerError)
+	categories := project.GetApplicationCategories()
+	if !r.URL.Query().Has("name") {
+		cs := maps.Values(categories)
+		sort.Slice(cs, func(i, j int) bool {
+			if cs[i].Builtin != cs[j].Builtin {
+				return cs[i].Builtin
+			}
+			return cs[i].Name < cs[j].Name
+		})
+		utils.WriteJson(w, cs)
 		return
 	}
-	utils.WriteJson(w, views.Categories(p))
+	name := model.ApplicationCategory(r.URL.Query().Get("name"))
+	if name == "" {
+		category := project.NewApplicationCategory()
+		utils.WriteJson(w, forms.ApplicationCategoryForm{ApplicationCategory: *category})
+		return
+	}
+	category := categories[name]
+	if category == nil {
+		klog.Warningln("unknown application category:", name)
+		http.Error(w, "Unknown application category: "+string(name), http.StatusNotFound)
+		return
+	}
+	utils.WriteJson(w, forms.ApplicationCategoryForm{Id: category.Name, ApplicationCategory: *category})
 }
 
 func (api *Api) CustomApplications(w http.ResponseWriter, r *http.Request, u *db.User) {
 	vars := mux.Vars(r)
 	projectId := vars["project"]
 
+	project, err := api.db.GetProject(db.ProjectId(projectId))
+	if err != nil {
+		klog.Errorln(err)
+		http.Error(w, "", http.StatusInternalServerError)
+		return
+	}
+
 	if r.Method == http.MethodPost {
 		if !api.IsAllowed(u, rbac.Actions.Project(projectId).CustomApplications().Edit()) {
 			http.Error(w, "You are not allowed to configure custom applications.", http.StatusForbidden)
 			return
 		}
+		if project.Settings.Readonly {
+			http.Error(w, "This project is defined through the config and cannot be modified via the UI.", http.StatusForbidden)
+			return
+		}
 		var form forms.CustomApplicationForm
-		if err := forms.ReadAndValidate(r, &form); err != nil {
+		if err = forms.ReadAndValidate(r, &form); err != nil {
 			klog.Warningln("bad request:", err)
 			http.Error(w, "Invalid name or patterns", http.StatusBadRequest)
 			return
 		}
-		if err := api.db.SaveCustomApplication(db.ProjectId(projectId), form.Name, form.NewName, form.InstancePatterns); err != nil {
+		if err = api.db.SaveCustomApplication(project.Id, form.Name, form.NewName, form.InstancePatterns); err != nil {
 			klog.Errorln("failed to save:", err)
 			http.Error(w, "", http.StatusInternalServerError)
 			return
 		}
 		return
 	}
+	utils.WriteJson(w, views.CustomApplications(project))
+}
+
+func (api *Api) CustomCloudPricing(w http.ResponseWriter, r *http.Request, u *db.User) {
+	vars := mux.Vars(r)
+	projectId := vars["project"]
 	p, err := api.db.GetProject(db.ProjectId(projectId))
+
 	if err != nil {
 		klog.Errorln(err)
 		http.Error(w, "", http.StatusInternalServerError)
 		return
 	}
-	utils.WriteJson(w, views.CustomApplications(p))
+	if r.Method == http.MethodGet {
+		utils.WriteJson(w, p.Settings.CustomCloudPricing)
+		return
+	}
+	if !api.IsAllowed(u, rbac.Actions.Project(projectId).CustomCloudPricing().Edit()) {
+		http.Error(w, "You are not allowed to configure custom cloud pricing.", http.StatusForbidden)
+		return
+	}
+	switch r.Method {
+	case http.MethodDelete:
+		p.Settings.CustomCloudPricing = nil
+	case http.MethodPost:
+		var form forms.CustomCloudPricingForm
+		if err := forms.ReadAndValidate(r, &form); err != nil {
+			klog.Warningln("bad request:", err)
+			http.Error(w, "Invalid form", http.StatusBadRequest)
+			return
+		}
+		p.Settings.CustomCloudPricing = &form.CustomCloudPricing
+	default:
+		http.Error(w, "", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := api.db.SaveProjectSettings(p); err != nil {
+		klog.Errorln("failed to save:", err)
+		http.Error(w, "", http.StatusInternalServerError)
+		return
+	}
 }
 
 func (api *Api) Integrations(w http.ResponseWriter, r *http.Request, u *db.User) {
@@ -457,14 +760,23 @@ func (api *Api) Integrations(w http.ResponseWriter, r *http.Request, u *db.User)
 		return
 	}
 
-	p, err := api.db.GetProject(db.ProjectId(projectId))
+	project, err := api.db.GetProject(db.ProjectId(projectId))
 	if err != nil {
 		klog.Errorln(err)
 		http.Error(w, "", http.StatusInternalServerError)
 		return
 	}
 
-	utils.WriteJson(w, views.Integrations(p))
+	integrations := project.Settings.Integrations
+	utils.WriteJson(w, struct {
+		BaseUrl      string               `json:"base_url"`
+		Integrations []db.IntegrationInfo `json:"integrations"`
+		Readonly     bool                 `json:"readonly"`
+	}{
+		BaseUrl:      integrations.BaseUrl,
+		Integrations: integrations.GetInfo(),
+		Readonly:     integrations.Readonly,
+	})
 }
 
 func (api *Api) Integration(w http.ResponseWriter, r *http.Request, u *db.User) {
@@ -483,7 +795,6 @@ func (api *Api) Integration(w http.ResponseWriter, r *http.Request, u *db.User) 
 		http.Error(w, "", http.StatusBadRequest)
 		return
 	}
-
 	isAllowed := api.IsAllowed(u, rbac.Actions.Project(projectId).Integrations().Edit())
 
 	if r.Method == http.MethodGet {
@@ -500,6 +811,28 @@ func (api *Api) Integration(w http.ResponseWriter, r *http.Request, u *db.User) 
 			}{
 				Form: form,
 				View: views.AWS(world),
+			})
+		case db.IntegrationTypeClickhouse:
+			cfg := project.ClickHouseConfig(api.globalClickHouse)
+			var ci *clickhouse.ClusterInfo
+			if cfg != nil {
+				config := clickhouse.NewClientConfig(cfg.Addr, cfg.Auth.User, cfg.Auth.Password)
+				config.Protocol = cfg.Protocol
+				config.Database = cfg.Database
+				config.TlsEnable = cfg.TlsEnable
+				config.TlsSkipVerify = cfg.TlsSkipVerify
+
+				if ci, err = clickhouse.GetClusterInfo(r.Context(), config); err != nil {
+					klog.Errorln(err)
+				}
+			}
+
+			utils.WriteJson(w, struct {
+				Form        forms.IntegrationForm   `json:"form"`
+				ClusterInfo *clickhouse.ClusterInfo `json:"cluster_info"`
+			}{
+				Form:        form,
+				ClusterInfo: ci,
 			})
 		default:
 			utils.WriteJson(w, form)
@@ -525,16 +858,19 @@ func (api *Api) Integration(w http.ResponseWriter, r *http.Request, u *db.User) 
 	defer cancel()
 	switch r.Method {
 	case http.MethodPost:
-		if err := form.Test(ctx, project); err != nil {
+		if err = form.Test(ctx, project); err != nil {
+			klog.Errorln("failed to test:", err)
 			http.Error(w, err.Error(), http.StatusBadRequest)
 		}
 		return
 	case http.MethodPut:
-		if err := form.Update(ctx, project, false); err != nil {
+		if err = form.Update(ctx, project, false); err != nil {
+			klog.Errorln("failed to update:", err)
 			http.Error(w, err.Error(), http.StatusBadRequest)
 		}
 	case http.MethodDelete:
-		if err := form.Update(ctx, project, true); err != nil {
+		if err = form.Update(ctx, project, true); err != nil {
+			klog.Errorln("failed to delete:", err)
 			http.Error(w, err.Error(), http.StatusBadRequest)
 		}
 	default:
@@ -548,8 +884,7 @@ func (api *Api) Integration(w http.ResponseWriter, r *http.Request, u *db.User) 
 		return
 	}
 	if api.globalClickHouse == nil {
-		cfg := project.Settings.Integrations.Clickhouse
-		err = api.collector.UpdateClickhouseClient(r.Context(), project.Id, cfg)
+		err = api.collector.UpdateClickhouseClient(r.Context(), project)
 		if err != nil {
 			klog.Errorln("clickhouse error:", err)
 			http.Error(w, "Clickhouse error: "+err.Error(), http.StatusInternalServerError)
@@ -567,7 +902,7 @@ func (api *Api) Prom(w http.ResponseWriter, r *http.Request, u *db.User) {
 		http.Error(w, "", http.StatusInternalServerError)
 		return
 	}
-	p := project.Prometheus
+	p := project.PrometheusConfig(api.globalPrometheus)
 	cfg := prom.NewClientConfig(p.Url, p.RefreshInterval)
 	cfg.BasicAuth = p.BasicAuth
 	cfg.TlsSkipVerify = p.TlsSkipVerify
@@ -583,12 +918,11 @@ func (api *Api) Prom(w http.ResponseWriter, r *http.Request, u *db.User) {
 }
 
 func (api *Api) Application(w http.ResponseWriter, r *http.Request, u *db.User) {
-	vars := mux.Vars(r)
-	projectId := vars["project"]
-	appId, err := model.NewApplicationIdFromString(vars["app"])
+	projectId := mux.Vars(r)["project"]
+	appId, err := GetApplicationId(r)
 	if err != nil {
 		klog.Warningln(err)
-		http.Error(w, "invalid application id: "+vars["app"], http.StatusBadRequest)
+		http.Error(w, "invalid application id", http.StatusBadRequest)
 		return
 	}
 	world, project, cacheStatus, err := api.LoadWorldByRequest(r)
@@ -613,16 +947,46 @@ func (api *Api) Application(w http.ResponseWriter, r *http.Request, u *db.User) 
 		return
 	}
 
-	auditor.Audit(world, project, app, project.ClickHouseConfig(api.globalClickHouse) != nil)
+	auditor.Audit(world, project, app, project.ClickHouseConfig(api.globalClickHouse) != nil, nil)
 
 	if project.ClickHouseConfig(api.globalClickHouse) != nil {
 		app.AddReport(model.AuditReportProfiling, &model.Widget{Profiling: &model.Profiling{ApplicationId: app.Id}, Width: "100%"})
 		app.AddReport(model.AuditReportTracing, &model.Widget{Tracing: &model.Tracing{ApplicationId: app.Id}, Width: "100%"})
 	}
-	utils.WriteJson(w, api.WithContext(project, cacheStatus, world, views.Application(world, app)))
+
+	utils.WriteJson(w, api.WithContext(project, cacheStatus, world, views.Application(project, world, app)))
 }
 
-func (api *Api) RCA(w http.ResponseWriter, r *http.Request, u *db.User) {
+func (api *Api) Incidents(w http.ResponseWriter, r *http.Request, u *db.User) {
+	vars := mux.Vars(r)
+	projectId := db.ProjectId(vars["project"])
+	limit := 100
+	if l := r.URL.Query().Get("limit"); l != "" {
+		l64, err := strconv.ParseUint(l, 10, 32)
+		if err != nil {
+			klog.Warningln("invalid limit:", l)
+			http.Error(w, "", http.StatusBadRequest)
+			return
+		}
+		limit = int(l64)
+	}
+	project, err := api.db.GetProject(projectId)
+	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			http.Error(w, "project not found", http.StatusNotFound)
+			klog.Warningln("project not found:", projectId)
+			return
+		}
+		klog.Errorln(err)
+		http.Error(w, "", http.StatusInternalServerError)
+		return
+	}
+	incidents, err := api.db.GetLatestIncidents(project.Id, limit)
+	if err != nil {
+		klog.Errorln(err)
+		http.Error(w, "", http.StatusInternalServerError)
+		return
+	}
 	world, project, cacheStatus, err := api.LoadWorldByRequest(r)
 	if err != nil {
 		klog.Errorln(err)
@@ -633,7 +997,7 @@ func (api *Api) RCA(w http.ResponseWriter, r *http.Request, u *db.User) {
 		utils.WriteJson(w, api.WithContext(project, cacheStatus, world, nil))
 		return
 	}
-	utils.WriteJson(w, api.WithContext(project, cacheStatus, world, "not implemented"))
+	utils.WriteJson(w, api.WithContext(project, cacheStatus, world, views.Incidents(world, incidents)))
 }
 
 func (api *Api) Incident(w http.ResponseWriter, r *http.Request, u *db.User) {
@@ -642,13 +1006,13 @@ func (api *Api) Incident(w http.ResponseWriter, r *http.Request, u *db.User) {
 	incidentKey := vars["incident"]
 	incident, err := api.db.GetIncidentByKey(db.ProjectId(projectId), incidentKey)
 	if err != nil {
+		if errors.Is(err, db.ErrNotFound) {
+			klog.Warningln("incident not found:", vars["key"])
+			http.Error(w, "Incident not found", http.StatusNotFound)
+			return
+		}
 		klog.Warningln("failed to get incident:", err)
 		http.Error(w, "failed to get incident", http.StatusInternalServerError)
-		return
-	}
-	if incident == nil {
-		klog.Warningln("incident not found:", vars["key"])
-		http.Error(w, "Incident not found", http.StatusNotFound)
 		return
 	}
 	values := r.URL.Query()
@@ -675,52 +1039,90 @@ func (api *Api) Incident(w http.ResponseWriter, r *http.Request, u *db.User) {
 		http.Error(w, "You are not allowed to view this application.", http.StatusForbidden)
 		return
 	}
-	auditor.Audit(world, project, app, project.ClickHouseConfig(api.globalClickHouse) != nil)
+	auditor.Audit(world, project, app, project.ClickHouseConfig(api.globalClickHouse) != nil, nil)
 	utils.WriteJson(w, api.WithContext(project, cacheStatus, world, views.Incident(world, app, incident)))
 }
 
 func (api *Api) Inspection(w http.ResponseWriter, r *http.Request, u *db.User) {
 	vars := mux.Vars(r)
 	projectId := vars["project"]
-	appId, err := model.NewApplicationIdFromString(vars["app"])
+	appId, err := GetApplicationId(r)
 	if err != nil {
 		klog.Warningln(err)
-		http.Error(w, "invalid application id: "+vars["app"], http.StatusBadRequest)
+		http.Error(w, "invalid application id", http.StatusBadRequest)
 		return
 	}
 	checkId := model.CheckId(vars["type"])
 
-	switch r.Method {
-	case http.MethodGet:
-		project, err := api.db.GetProject(db.ProjectId(projectId))
-		if err != nil {
-			klog.Errorln("failed to get project:", err)
-			http.Error(w, "", http.StatusInternalServerError)
+	world, project, _, err := api.LoadWorldByRequest(r)
+	if err != nil {
+		klog.Errorln(err)
+		http.Error(w, "", http.StatusInternalServerError)
+		return
+	}
+	if world == nil {
+		http.Error(w, "Application not found", http.StatusNotFound)
+		return
+	}
+
+	var app *model.Application
+	var category model.ApplicationCategory
+	if !appId.IsZero() {
+		app = world.GetApplication(appId)
+		if app == nil {
+			klog.Warningln("application not found:", appId)
+			http.Error(w, "Application not found", http.StatusNotFound)
 			return
 		}
-		checkConfigs, err := api.db.GetCheckConfigs(db.ProjectId(projectId))
+		category = app.Category
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		checkConfigs, err := api.db.GetCheckConfigs(project.Id)
 		if err != nil {
 			klog.Errorln("failed to get check configs:", err)
 			http.Error(w, "", http.StatusInternalServerError)
 			return
 		}
-		res := struct {
-			Form         any               `json:"form"`
-			Integrations map[string]string `json:"integrations"`
-		}{
-			Integrations: map[string]string{},
+		type Integration struct {
+			Name    string `json:"name"`
+			Details string `json:"details"`
 		}
-		for _, i := range project.Settings.Integrations.GetInfo() {
-			if i.Configured && i.Incidents {
-				res.Integrations[i.Title] = i.Details
+		res := struct {
+			Form         any           `json:"form"`
+			Integrations []Integration `json:"integrations"`
+		}{}
+
+		if app != nil {
+			if categorySettings := project.GetApplicationCategories()[app.Category]; categorySettings != nil {
+				notificationSettings := categorySettings.NotificationSettings.Incidents
+				if notificationSettings.Enabled {
+					if slack := notificationSettings.Slack; slack != nil && slack.Enabled {
+						res.Integrations = append(res.Integrations, Integration{Name: "Slack", Details: fmt.Sprintf("channel: #%s", slack.Channel)})
+					}
+					if teams := notificationSettings.Teams; teams != nil && teams.Enabled {
+						res.Integrations = append(res.Integrations, Integration{Name: "MS Teams"})
+					}
+					if pagerduty := notificationSettings.Pagerduty; pagerduty != nil && pagerduty.Enabled {
+						res.Integrations = append(res.Integrations, Integration{Name: "Pagerduty"})
+					}
+					if opsgenie := notificationSettings.Opsgenie; opsgenie != nil && opsgenie.Enabled {
+						res.Integrations = append(res.Integrations, Integration{Name: "Opsgenie"})
+					}
+					if webhook := notificationSettings.Webhook; webhook != nil && webhook.Enabled {
+						res.Integrations = append(res.Integrations, Integration{Name: "Webhook"})
+					}
+				}
 			}
 		}
+
 		switch checkId {
 		case model.Checks.SLOAvailability.Id:
 			cfg, def := checkConfigs.GetAvailability(appId)
 			res.Form = forms.CheckConfigSLOAvailabilityForm{Configs: []model.CheckConfigSLOAvailability{cfg}, Default: def}
 		case model.Checks.SLOLatency.Id:
-			cfg, def := checkConfigs.GetLatency(appId, model.CalcApplicationCategory(appId, project.Settings.ApplicationCategories))
+			cfg, def := checkConfigs.GetLatency(appId, category)
 			res.Form = forms.CheckConfigSLOLatencyForm{Configs: []model.CheckConfigSLOLatency{cfg}, Default: def}
 		default:
 			form := forms.CheckConfigForm{
@@ -748,19 +1150,19 @@ func (api *Api) Inspection(w http.ResponseWriter, r *http.Request, u *db.User) {
 				http.Error(w, "", http.StatusBadRequest)
 				return
 			}
-			if err := api.db.SaveCheckConfig(db.ProjectId(projectId), appId, checkId, form.Configs); err != nil {
+			if err = api.db.SaveCheckConfig(db.ProjectId(projectId), appId, checkId, form.Configs); err != nil {
 				klog.Errorln("failed to save check config:", err)
 				http.Error(w, "", http.StatusInternalServerError)
 				return
 			}
 		case model.Checks.SLOLatency.Id:
 			var form forms.CheckConfigSLOLatencyForm
-			if err := forms.ReadAndValidate(r, &form); err != nil {
+			if err = forms.ReadAndValidate(r, &form); err != nil {
 				klog.Warningln("bad request:", err)
 				http.Error(w, "", http.StatusBadRequest)
 				return
 			}
-			if err := api.db.SaveCheckConfig(db.ProjectId(projectId), appId, checkId, form.Configs); err != nil {
+			if err = api.db.SaveCheckConfig(db.ProjectId(projectId), appId, checkId, form.Configs); err != nil {
 				klog.Errorln("failed to save check config:", err)
 				http.Error(w, "", http.StatusInternalServerError)
 				return
@@ -782,7 +1184,7 @@ func (api *Api) Inspection(w http.ResponseWriter, r *http.Request, u *db.User) {
 				case 2:
 					id = appId
 				}
-				if err := api.db.SaveCheckConfig(db.ProjectId(projectId), id, checkId, cfg); err != nil {
+				if err = api.db.SaveCheckConfig(db.ProjectId(projectId), id, checkId, cfg); err != nil {
 					klog.Errorln("failed to save check config:", err)
 					http.Error(w, "", http.StatusInternalServerError)
 					return
@@ -796,10 +1198,10 @@ func (api *Api) Inspection(w http.ResponseWriter, r *http.Request, u *db.User) {
 func (api *Api) Instrumentation(w http.ResponseWriter, r *http.Request, u *db.User) {
 	vars := mux.Vars(r)
 	projectId := vars["project"]
-	appId, err := model.NewApplicationIdFromString(vars["app"])
+	appId, err := GetApplicationId(r)
 	if err != nil {
 		klog.Warningln(err)
-		http.Error(w, "invalid application id: "+vars["app"], http.StatusBadRequest)
+		http.Error(w, "invalid application id", http.StatusBadRequest)
 		return
 	}
 	world, _, _, err := api.LoadWorldByRequest(r)
@@ -844,8 +1246,12 @@ func (api *Api) Instrumentation(w http.ResponseWriter, r *http.Request, u *db.Us
 	var instrumentation *model.ApplicationInstrumentation
 	if app.Settings != nil && app.Settings.Instrumentation != nil && app.Settings.Instrumentation[t] != nil {
 		instrumentation = app.Settings.Instrumentation[t]
+		if instrumentation.Enabled == nil {
+			instrumentation.Enabled = utils.Ptr(true)
+		}
 	} else {
 		instrumentation = model.GetDefaultInstrumentation(t)
+		instrumentation.Enabled = utils.Ptr(false)
 	}
 	if instrumentation == nil {
 		http.Error(w, fmt.Sprintf("unsupported instrumentation type: %s", t), http.StatusBadRequest)
@@ -859,12 +1265,11 @@ func (api *Api) Instrumentation(w http.ResponseWriter, r *http.Request, u *db.Us
 }
 
 func (api *Api) Profiling(w http.ResponseWriter, r *http.Request, u *db.User) {
-	vars := mux.Vars(r)
-	projectId := vars["project"]
-	appId, err := model.NewApplicationIdFromString(vars["app"])
+	projectId := mux.Vars(r)["project"]
+	appId, err := GetApplicationId(r)
 	if err != nil {
 		klog.Warningln(err)
-		http.Error(w, "invalid application id: "+vars["app"], http.StatusBadRequest)
+		http.Error(w, "invalid application id", http.StatusBadRequest)
 		return
 	}
 
@@ -904,21 +1309,23 @@ func (api *Api) Profiling(w http.ResponseWriter, r *http.Request, u *db.User) {
 		return
 	}
 	var ch *clickhouse.Client
-	if ch, err = api.getClickhouseClient(project); err != nil {
+	if ch, err = api.GetClickhouseClient(project); err != nil {
 		klog.Warningln(err)
+		http.Error(w, "ClickHouse is not available", http.StatusInternalServerError)
+		return
 	}
+	defer ch.Close()
 	q := r.URL.Query()
-	auditor.Audit(world, project, nil, project.ClickHouseConfig(api.globalClickHouse) != nil)
-	utils.WriteJson(w, api.WithContext(project, cacheStatus, world, views.Profiling(r.Context(), ch, app, q, world.Ctx)))
+	auditor.Audit(world, project, nil, project.ClickHouseConfig(api.globalClickHouse) != nil, nil)
+	utils.WriteJson(w, api.WithContext(project, cacheStatus, world, views.Profiling(r.Context(), ch, app, q, world)))
 }
 
 func (api *Api) Tracing(w http.ResponseWriter, r *http.Request, u *db.User) {
-	vars := mux.Vars(r)
-	projectId := vars["project"]
-	appId, err := model.NewApplicationIdFromString(vars["app"])
+	projectId := mux.Vars(r)["project"]
+	appId, err := GetApplicationId(r)
 	if err != nil {
 		klog.Warningln(err)
-		http.Error(w, "invalid application id: "+vars["app"], http.StatusBadRequest)
+		http.Error(w, "invalid application id", http.StatusBadRequest)
 		return
 	}
 
@@ -959,20 +1366,22 @@ func (api *Api) Tracing(w http.ResponseWriter, r *http.Request, u *db.User) {
 	}
 	q := r.URL.Query()
 	var ch *clickhouse.Client
-	if ch, err = api.getClickhouseClient(project); err != nil {
+	if ch, err = api.GetClickhouseClient(project); err != nil {
 		klog.Warningln(err)
+		http.Error(w, "ClickHouse is not available", http.StatusInternalServerError)
+		return
 	}
-	auditor.Audit(world, project, nil, project.ClickHouseConfig(api.globalClickHouse) != nil)
+	defer ch.Close()
+	auditor.Audit(world, project, nil, project.ClickHouseConfig(api.globalClickHouse) != nil, nil)
 	utils.WriteJson(w, api.WithContext(project, cacheStatus, world, views.Tracing(r.Context(), ch, app, q, world)))
 }
 
 func (api *Api) Logs(w http.ResponseWriter, r *http.Request, u *db.User) {
-	vars := mux.Vars(r)
-	projectId := vars["project"]
-	appId, err := model.NewApplicationIdFromString(vars["app"])
+	projectId := mux.Vars(r)["project"]
+	appId, err := GetApplicationId(r)
 	if err != nil {
 		klog.Warningln(err)
-		http.Error(w, "invalid application id: "+vars["app"], http.StatusBadRequest)
+		http.Error(w, "invalid application id", http.StatusBadRequest)
 		return
 	}
 
@@ -1011,19 +1420,106 @@ func (api *Api) Logs(w http.ResponseWriter, r *http.Request, u *db.User) {
 		http.Error(w, "Application not found", http.StatusNotFound)
 		return
 	}
-	var ch *clickhouse.Client
-	if ch, err = api.getClickhouseClient(project); err != nil {
-		klog.Warningln(err)
+	ch, chErr := api.GetClickhouseClient(project)
+	if chErr != nil {
+		klog.Warningln(chErr)
 	}
-	auditor.Audit(world, project, nil, project.ClickHouseConfig(api.globalClickHouse) != nil)
+	defer ch.Close()
+	auditor.Audit(world, project, nil, project.ClickHouseConfig(api.globalClickHouse) != nil, nil)
 	q := r.URL.Query()
-	utils.WriteJson(w, api.WithContext(project, cacheStatus, world, views.Logs(r.Context(), ch, app, q, world)))
+	res := views.Logs(r.Context(), ch, app, q, world)
+	if chErr != nil {
+		res.Message = "Failed to load logs: ClickHouse is not available"
+	}
+	utils.WriteJson(w, api.WithContext(project, cacheStatus, world, res))
+}
+
+func (api *Api) Risks(w http.ResponseWriter, r *http.Request, u *db.User) {
+	projectId := mux.Vars(r)["project"]
+	appId, err := GetApplicationId(r)
+	if err != nil {
+		klog.Warningln(err)
+		http.Error(w, "invalid application id", http.StatusBadRequest)
+		return
+	}
+
+	world, project, cacheStatus, err := api.LoadWorldByRequest(r)
+	if err != nil {
+		klog.Errorln(err)
+		http.Error(w, "", http.StatusInternalServerError)
+		return
+	}
+	if project == nil || world == nil {
+		utils.WriteJson(w, api.WithContext(project, cacheStatus, world, nil))
+		return
+	}
+	app := world.GetApplication(appId)
+	if app == nil {
+		klog.Warningln("application not found:", appId)
+		http.Error(w, "Application not found", http.StatusNotFound)
+		return
+	}
+	if r.Method == http.MethodPost {
+		if !api.IsAllowed(u, rbac.Actions.Project(projectId).Risks().Edit()) {
+			http.Error(w, "You are not allowed to dismiss risks.", http.StatusForbidden)
+			return
+		}
+		var form forms.ApplicationSettingsRisksForm
+		if err := forms.ReadAndValidate(r, &form); err != nil {
+			klog.Warningln("bad request:", err)
+			http.Error(w, "invalid data", http.StatusBadRequest)
+			return
+		}
+		var overrides []model.RiskOverride
+		switch form.Action {
+		case "dismiss":
+			newRo := model.RiskOverride{
+				Key: form.Key,
+				Dismissal: &model.RiskDismissal{
+					By:        u.Name,
+					Timestamp: time.Now().Unix(),
+					Reason:    form.Reason,
+				},
+			}
+			if app.Settings != nil {
+				for _, ro := range app.Settings.RiskOverrides {
+					if ro.Key != form.Key {
+						overrides = append(overrides, ro)
+					}
+				}
+			}
+			overrides = append(overrides, newRo)
+		case "mark_as_active":
+			if app.Settings != nil {
+				for _, ro := range app.Settings.RiskOverrides {
+					if ro.Key != form.Key {
+						overrides = append(overrides, ro)
+					}
+				}
+			}
+		default:
+			klog.Warningln("unknown risk action:", form.Action)
+			http.Error(w, "", http.StatusBadRequest)
+			return
+		}
+		if err = api.db.SaveApplicationSetting(db.ProjectId(projectId), appId, overrides); err != nil {
+			klog.Errorln(err)
+			http.Error(w, "", http.StatusInternalServerError)
+			return
+		}
+		return
+	}
 }
 
 func (api *Api) Node(w http.ResponseWriter, r *http.Request, u *db.User) {
 	vars := mux.Vars(r)
 	projectId := vars["project"]
-	nodeName := vars["node"]
+	nodeName, err := url.QueryUnescape(vars["node"])
+	if err != nil {
+		klog.Warningln(err)
+		http.Error(w, "invalid node name", http.StatusBadRequest)
+		return
+	}
 	if !api.IsAllowed(u, rbac.Actions.Project(projectId).Node(nodeName).View()) {
 		http.Error(w, "You are not allowed to view this node.", http.StatusForbidden)
 		return
@@ -1044,7 +1540,7 @@ func (api *Api) Node(w http.ResponseWriter, r *http.Request, u *db.User) {
 		http.Error(w, "Node not found", http.StatusNotFound)
 		return
 	}
-	auditor.Audit(world, project, nil, project.ClickHouseConfig(api.globalClickHouse) != nil)
+	auditor.Audit(world, project, nil, project.ClickHouseConfig(api.globalClickHouse) != nil, nil)
 	utils.WriteJson(w, api.WithContext(project, cacheStatus, world, auditor.AuditNode(world, node)))
 }
 
@@ -1070,12 +1566,10 @@ func (api *Api) LoadWorld(ctx context.Context, project *db.Project, from, to tim
 		return nil, cacheStatus, err
 	}
 
-	duration := to.Sub(from)
 	if cacheTo.Before(to) {
 		to = cacheTo
-		from = to.Add(-duration)
 	}
-	step = increaseStepForBigDurations(duration, step)
+	step = increaseStepForBigDurations(from, to, step)
 
 	ctr := constructor.New(api.db, project, cacheClient, api.pricing)
 	world, err := ctr.LoadWorld(ctx, from, to, step, nil)
@@ -1093,35 +1587,43 @@ func (api *Api) LoadWorldByRequest(r *http.Request) (*model.World, *db.Project, 
 		return nil, nil, nil, err
 	}
 
-	now := timeseries.Now()
-	q := r.URL.Query()
-	from := utils.ParseTime(now, q.Get("from"), now.Add(-timeseries.Hour))
-	to := utils.ParseTime(now, q.Get("to"), now)
-
-	incidentKey := q.Get("incident")
-	if incidentKey != "" {
-		if incident, err := api.db.GetIncidentByKey(projectId, incidentKey); err != nil {
-			klog.Warningln("failed to get incident:", err)
-		} else {
-			margin := model.MaxAlertRuleShortWindow + 15*timeseries.Minute
-			from = incident.OpenedAt.Add(-margin)
-			if incident.Resolved() {
-				if t := incident.ResolvedAt.Add(margin); t.Before(to) {
-					to = t
-				}
-			}
-		}
-	}
-
+	from, to, _ := api.getTimeContext(r)
 	world, cacheStatus, err := api.LoadWorld(r.Context(), project, from, to)
 	if world == nil {
-		step := increaseStepForBigDurations(to.Sub(from), 15*timeseries.Second)
+		step := increaseStepForBigDurations(from, to, 15*timeseries.Second)
 		world = model.NewWorld(from, to.Add(-step), step, step)
 	}
 	return world, project, cacheStatus, err
 }
 
-func increaseStepForBigDurations(duration, step timeseries.Duration) timeseries.Duration {
+func (api *Api) getTimeContext(r *http.Request) (from timeseries.Time, to timeseries.Time, incident *model.ApplicationIncident) {
+	now := timeseries.Now()
+	q := r.URL.Query()
+	from = utils.ParseTime(now, q.Get("from"), now.Add(-timeseries.Hour))
+	to = utils.ParseTime(now, q.Get("to"), now)
+	if from >= to {
+		from = to.Add(-timeseries.Hour)
+	}
+	incidentKey := q.Get("incident")
+	if incidentKey != "" {
+		projectId := db.ProjectId(mux.Vars(r)["project"])
+		var err error
+		if incident, err = api.db.GetIncidentByKey(projectId, incidentKey); err != nil {
+			klog.Warningln("failed to get incident:", err)
+		} else {
+			from = incident.OpenedAt.Add(-model.IncidentTimeOffset)
+			if incident.Resolved() {
+				to = incident.ResolvedAt.Add(model.IncidentTimeOffset)
+			} else {
+				to = now
+			}
+		}
+	}
+	return
+}
+
+func increaseStepForBigDurations(from, to timeseries.Time, step timeseries.Duration) timeseries.Duration {
+	duration := to.Sub(from)
 	switch {
 	case duration > 5*timeseries.Day:
 		return maxDuration(step, 60*timeseries.Minute)
@@ -1144,7 +1646,7 @@ func maxDuration(d1, d2 timeseries.Duration) timeseries.Duration {
 	return d2
 }
 
-func (api *Api) getClickhouseClient(project *db.Project) (*clickhouse.Client, error) {
+func (api *Api) GetClickhouseClient(project *db.Project) (*clickhouse.Client, error) {
 	cfg := project.ClickHouseConfig(api.globalClickHouse)
 	if cfg == nil {
 		return nil, nil
@@ -1154,9 +1656,21 @@ func (api *Api) getClickhouseClient(project *db.Project) (*clickhouse.Client, er
 	config.Database = cfg.Database
 	config.TlsEnable = cfg.TlsEnable
 	config.TlsSkipVerify = cfg.TlsSkipVerify
-	distributed, err := api.collector.IsClickhouseDistributed(project.Id)
+	distributed, err := api.collector.IsClickhouseDistributed(project)
 	if err != nil {
 		return nil, err
 	}
 	return clickhouse.NewClient(config, distributed)
+}
+
+func GetApplicationId(r *http.Request) (model.ApplicationId, error) {
+	appIdStr, err := url.QueryUnescape(mux.Vars(r)["app"])
+	if err != nil {
+		return model.ApplicationId{}, err
+	}
+	appId, err := model.NewApplicationIdFromString(appIdStr)
+	if err != nil {
+		return model.ApplicationId{}, err
+	}
+	return appId, nil
 }

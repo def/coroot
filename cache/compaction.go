@@ -88,7 +88,7 @@ func (c *Cache) compaction() {
 		}(tasksCh)
 	}
 
-	for range time.Tick(cfg.Interval) {
+	for range time.Tick(cfg.Interval.ToStandard()) {
 		klog.Infoln("compaction iteration started")
 		var tasks []*CompactionTask
 		c.lock.RLock()
@@ -116,7 +116,7 @@ func (c *Cache) compact(t CompactionTask) error {
 		return fmt.Errorf("no src chunks")
 	}
 	start := time.Now()
-	metrics := map[uint64]model.MetricValues{}
+	metrics := map[uint64]*model.MetricValues{}
 	sort.Slice(t.src, func(i, j int) bool {
 		return t.src[i].From < t.src[j].From
 	})
@@ -129,11 +129,11 @@ func (c *Cache) compact(t CompactionTask) error {
 	pointsCount := int(t.compactor.DstChunkDuration / step)
 	for _, i := range t.src {
 		if err := chunk.Read(i.Path, t.dstChunk, pointsCount, step, metrics, timeseries.FillAny); err != nil {
-			return fmt.Errorf("failed to read metrics from src chunk while compaction: %s", err)
+			return fmt.Errorf("failed to read from src chunk %s: %s", i.Path, err)
 		}
 	}
 
-	dst := make([]model.MetricValues, 0, len(metrics))
+	dst := make([]*model.MetricValues, 0, len(metrics))
 	for _, m := range metrics {
 		dst = append(dst, m)
 	}

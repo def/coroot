@@ -2,6 +2,7 @@ package collector
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 
@@ -15,8 +16,23 @@ import (
 	"k8s.io/klog"
 )
 
+type ApplicationInstrumentation struct {
+	Type        model.ApplicationType `json:"type"`
+	Host        string                `json:"host"`
+	Port        string                `json:"port"`
+	Credentials model.Credentials     `json:"credentials"`
+	Params      map[string]string     `json:"params"`
+	Instance    string                `json:"instance"`
+}
+
+type ConfigData struct {
+	ApplicationInstrumentation []ApplicationInstrumentation `json:"application_instrumentation"`
+
+	AWSConfig *db.IntegrationAWS `json:"aws_config"`
+}
+
 func (c *Collector) Config(w http.ResponseWriter, r *http.Request) {
-	project, err := c.getProject(db.ProjectId(r.Header.Get(ApiKeyHeader)))
+	project, err := c.getProject(r.Header.Get(ApiKeyHeader))
 	if err != nil {
 		klog.Errorln(err)
 		if errors.Is(err, ErrProjectNotFound) {
@@ -52,7 +68,7 @@ func (c *Collector) Config(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var res model.Config
+	var res ConfigData
 
 	res.AWSConfig = project.Settings.Integrations.AWS
 
@@ -60,9 +76,6 @@ func (c *Collector) Config(w http.ResponseWriter, r *http.Request) {
 		instancesByType := map[model.ApplicationType]map[*model.Instance]bool{}
 		if app.Id.Kind == model.ApplicationKindExternalService {
 			for _, d := range app.Downstreams {
-				if d.RemoteInstance == nil || d.RemoteInstance.IsObsolete() {
-					continue
-				}
 				for protocol := range d.RequestsCount {
 					t := protocol.ToApplicationType()
 					if t == model.ApplicationTypeUnknown {
@@ -71,7 +84,11 @@ func (c *Collector) Config(w http.ResponseWriter, r *http.Request) {
 					if instancesByType[t] == nil {
 						instancesByType[t] = map[*model.Instance]bool{}
 					}
-					instancesByType[t][d.RemoteInstance] = true
+					for _, i := range d.Application.Instances {
+						if !i.IsObsolete() {
+							instancesByType[t][i] = true
+						}
+					}
 				}
 			}
 		} else {
@@ -93,15 +110,14 @@ func (c *Collector) Config(w http.ResponseWriter, r *http.Request) {
 			var instrumentation *model.ApplicationInstrumentation
 			if app.Settings != nil && app.Settings.Instrumentation != nil && app.Settings.Instrumentation[it] != nil {
 				instrumentation = app.Settings.Instrumentation[it]
-			} else {
-				instrumentation = model.GetDefaultInstrumentation(it)
 			}
-			if instrumentation == nil || instrumentation.Disabled {
+			if instrumentation == nil {
 				continue
 			}
-			if instrumentation.Type.IsCredentialsRequired() && (instrumentation.Credentials.Username == "" || instrumentation.Credentials.Password == "") {
+			if instrumentation.Enabled != nil && !*instrumentation.Enabled {
 				continue
 			}
+
 			for instance := range instancesByType[t] {
 				ips := map[string]netaddr.IP{}
 				for listen, active := range instance.TcpListens {
@@ -112,8 +128,18 @@ func (c *Collector) Config(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				if ip := SelectIP(maps.Values(ips)); ip != nil {
-					i := *instrumentation // copy
-					i.Host = ip.String()
+					i := ApplicationInstrumentation{
+						Type:        instrumentation.Type,
+						Host:        ip.String(),
+						Port:        instrumentation.Port,
+						Credentials: instrumentation.Credentials,
+						Params:      instrumentation.Params,
+					}
+					owner := instance.Owner
+					i.Instance = fmt.Sprintf("app=%s instance=%s node=%s", owner.Id.Name, instance.Name, instance.NodeName())
+					if owner.Id.Namespace != "_" {
+						i.Instance = fmt.Sprintf("ns=%s %s", owner.Id.Namespace, i.Instance)
+					}
 					res.ApplicationInstrumentation = append(res.ApplicationInstrumentation, i)
 				}
 			}

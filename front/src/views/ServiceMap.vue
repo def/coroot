@@ -1,14 +1,8 @@
 <template>
-    <div>
-        <v-progress-linear indeterminate v-if="loading" color="green" />
+    <Views :loading="loading" :error="error">
+        <NoData v-if="!loading && !applications.length" />
 
-        <v-alert v-if="error" color="red" icon="mdi-alert-octagon-outline" outlined text>
-            {{ error }}
-        </v-alert>
-
-        <NoData v-else-if="!loading && !applications.length" />
-
-        <ApplicationFilter v-else :applications="applications" :autoSelectNamespaceThreshold="maxApplications" @filter="setFilter" class="my-4" />
+        <ApplicationFilter v-else :applications="applications" :autoSelectNamespaceThreshold="maxApplications" @filter="setFilter" class="mb-4" />
 
         <div v-if="tooManyApplications" class="text-center red--text mt-5">
             Too many applications ({{ tooManyApplications }}) to render. Please choose a different category or namespace.
@@ -23,7 +17,7 @@
             >
                 <div v-for="a in apps" style="text-align: center">
                     <div :ref="a.id" class="app" :class="{ selected: a.hi(hi) }" @mouseenter="hi = a.id" @mouseleave="hi = null">
-                        <div class="d-flex">
+                        <div class="d-flex align-center">
                             <div class="flex-grow-1 name">
                                 <router-link :to="{ name: 'overview', params: { view: 'applications', id: a.id }, query: $utils.contextQuery() }">
                                     <AppHealth :app="a" />
@@ -32,6 +26,7 @@
                             <div>
                                 <AppPreferences :app="a" :categories="categories" />
                             </div>
+                            <AppIcon :icon="a.icon" />
                         </div>
                         <Labels v-if="!hideLabels" :labels="a.labels" class="d-none d-sm-block label" />
                     </div>
@@ -68,12 +63,14 @@
                 </div>
             </template>
         </div>
-    </div>
+    </Views>
 </template>
 
 <script>
+import Views from '@/views/Views.vue';
 import Labels from '@/components/Labels.vue';
 import AppHealth from '@/components/AppHealth.vue';
+import AppIcon from '@/components/AppIcon.vue';
 import ApplicationFilter from '@/components/ApplicationFilter.vue';
 import AppPreferences from '@/components/AppPreferences.vue';
 import NoData from '@/components/NoData.vue';
@@ -113,7 +110,7 @@ function calcLevel(index, a, level, backLinks) {
 }
 
 export default {
-    components: { NoData, AppPreferences, ApplicationFilter, AppHealth, Labels },
+    components: { Views, NoData, AppPreferences, ApplicationFilter, AppHealth, Labels, AppIcon },
 
     data() {
         return {
@@ -404,5 +401,6 @@ svg {
     padding: 2px;
     border-radius: 2px;
     text-align: right;
+    pointer-events: none;
 }
 </style>

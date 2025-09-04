@@ -46,7 +46,13 @@ func (s *Slack) SendIncident(ctx context.Context, baseUrl string, n *db.Incident
 			details = append(details, fmt.Sprintf("• *%s* / %s: %s", r.Name, r.Check, r.Message))
 		}
 	}
-	body := s.body(n.Status.Color(), snippet, s.section(s.text(header)), s.section(s.text(strings.Join(details, "\n"))))
+	blocks := []slack.Block{
+		s.section(s.text(header)),
+	}
+	if len(details) > 0 {
+		blocks = append(blocks, s.section(s.text(strings.Join(details, "\n"))))
+	}
+	body := s.body(n.Status.Color(), snippet, blocks...)
 	opts := []slack.MsgOption{body, slack.MsgOptionDisableLinkUnfurl()}
 	if ts != "" {
 		opts = append(opts, slack.MsgOptionTS(ts), slack.MsgOptionBroadcast())
@@ -107,9 +113,6 @@ func (s *Slack) SendDeployment(ctx context.Context, project *db.Project, ds mode
 	ch, ts, _, err := s.client.SendMessageContext(ctx, channel, options...)
 	if err != nil {
 		return fmt.Errorf("slack error: %w", err)
-	}
-	if err != nil {
-		return err
 	}
 	d.Notifications.Slack.Channel = ch
 	d.Notifications.Slack.ThreadTs = ts

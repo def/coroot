@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"math"
 	"strings"
+
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 var NaN = float32(math.NaN())
@@ -64,6 +66,68 @@ func (ts *TimeSeries) MarshalJSON() ([]byte, error) {
 	}
 	d, err := json.Marshal(vs)
 	return d, err
+}
+
+func (ts *TimeSeries) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		ts.data = nil
+		ts.last = NaN
+		return nil
+	}
+
+	var raw []*float32
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	values := make([]float32, len(raw))
+	for i, v := range raw {
+		if v == nil {
+			values[i] = NaN
+		} else {
+			values[i] = *v
+		}
+	}
+
+	ts.data = values
+	if len(values) > 0 {
+		ts.last = values[len(values)-1]
+	} else {
+		ts.last = NaN
+	}
+
+	return nil
+}
+
+type Msgpack struct {
+	From Time     `msgpack:"from"`
+	Step Duration `msgpack:"step"`
+	Data []byte   `msgpack:"data"`
+}
+
+func (ts *TimeSeries) EncodeMsgpack(enc *msgpack.Encoder) error {
+	m := Msgpack{
+		From: ts.from,
+		Step: ts.step,
+		Data: asBytes32(ts.data),
+	}
+	return enc.Encode(m)
+}
+
+func (ts *TimeSeries) DecodeMsgpack(dec *msgpack.Decoder) error {
+	var m Msgpack
+	err := dec.Decode(&m)
+	if err != nil {
+		return err
+	}
+	ts.from = m.From
+	ts.step = m.Step
+	ts.last = NaN
+	if len(m.Data) > 0 {
+		ts.data = asFloats32(m.Data)
+		ts.last = ts.data[len(ts.data)-1]
+	}
+	return nil
 }
 
 func (ts *TimeSeries) String() string {

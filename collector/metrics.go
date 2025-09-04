@@ -1,6 +1,7 @@
 package collector
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/tls"
 	"errors"
@@ -10,7 +11,6 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/coroot/coroot/db"
 	"github.com/gogo/protobuf/proto"
 	"github.com/golang/snappy"
 	"github.com/prometheus/prometheus/prompb"
@@ -61,8 +61,7 @@ func addLabelsIfNeeded(r *http.Request, extraLabels map[string]string) (io.Reade
 }
 
 func (c *Collector) Metrics(w http.ResponseWriter, r *http.Request) {
-	projectId := db.ProjectId(r.Header.Get(ApiKeyHeader))
-	project, err := c.getProject(projectId)
+	project, err := c.getProject(r.Header.Get(ApiKeyHeader))
 	if err != nil {
 		klog.Errorln(err)
 		if errors.Is(err, ErrProjectNotFound) {
@@ -73,19 +72,28 @@ func (c *Collector) Metrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := project.PrometheusConfig(c.globalPrometheus)
-	u, err := url.Parse(cfg.Url)
-	if err != nil {
-		klog.Errorln(err)
-		http.Error(w, "", http.StatusInternalServerError)
-		return
+
+	var u *url.URL
+	if cfg.RemoteWriteUrl == "" {
+		u, err = url.Parse(cfg.Url)
+		if err != nil {
+			klog.Errorln(err)
+			http.Error(w, "", http.StatusInternalServerError)
+			return
+		}
+		u = u.JoinPath("/api/v1/write")
+	} else {
+		u, err = url.Parse(cfg.RemoteWriteUrl)
+		if err != nil {
+			klog.Errorln(err)
+			http.Error(w, "", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	if cfg.BasicAuth != nil {
 		u.User = url.UserPassword(cfg.BasicAuth.User, cfg.BasicAuth.Password)
 	}
-
-	u = u.JoinPath("/api/v1/write")
-
 	body, err := addLabelsIfNeeded(r, cfg.ExtraLabels)
 	if err != nil {
 		klog.Errorln(err)
@@ -111,7 +119,6 @@ func (c *Collector) Metrics(w http.ResponseWriter, r *http.Request) {
 			req.Header.Add(k, v)
 		}
 	}
-
 	httpClient := secureClient
 	if cfg.TlsSkipVerify {
 		httpClient = insecureClient
@@ -122,12 +129,27 @@ func (c *Collector) Metrics(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "", http.StatusInternalServerError)
 		return
 	}
+	defer func() {
+		io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+	}()
 	for k, vs := range res.Header {
 		for _, v := range vs {
 			w.Header().Add(k, v)
 		}
 	}
+	if res.StatusCode == http.StatusBadRequest {
+		scanner := bufio.NewScanner(io.LimitReader(res.Body, 1024))
+		line := ""
+		if scanner.Scan() {
+			line = scanner.Text()
+		}
+		klog.Errorf("failed to write: got %d (%s) from prometheus, responding to the agent with 200 (to prevent retry)", res.StatusCode, line)
+		w.WriteHeader(http.StatusOK)
+		return
+	} else if res.StatusCode > 400 {
+		klog.Errorf("failed to write: got %d from prometheus", res.StatusCode)
+	}
 	w.WriteHeader(res.StatusCode)
-	_, _ = io.Copy(w, r.Body)
-	_ = res.Body.Close()
+	_, _ = io.Copy(w, res.Body)
 }

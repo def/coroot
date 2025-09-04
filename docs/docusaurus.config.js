@@ -24,6 +24,11 @@ const config = {
     locales: ['en'],
   },
 
+  scripts: [
+    {src: '/js/st.js'},
+    {src: 'https://plausible.io/js/script.js', defer: true, "data-domain": "docs.coroot.com"}
+  ],
+
   presets: [
     [
       'classic',
@@ -121,6 +126,17 @@ const config = {
         additionalLanguages: ['java', 'bash'],
       },
     }),
+
+  plugins: [
+    [
+      '@docusaurus/plugin-client-redirects',
+      {
+        redirects: [
+          { from: '/configuration/cli-arguments', to: '/configuration/configuration' },
+        ],
+      },
+    ],
+  ],
 };
 
 export default config;

@@ -1,8 +1,9 @@
 <template>
     <v-form v-model="valid" ref="form" style="max-width: 800px">
-        <v-alert v-if="form.global" color="primary" outlined text
-            >This project uses a global Prometheus configuration that can't be changed through the UI</v-alert
-        >
+        <v-alert v-if="form.global" color="primary" outlined text>
+            This project uses a global Prometheus configuration that can't be changed through the UI
+        </v-alert>
+
         <div class="subtitle-1">Prometheus URL</div>
         <div class="caption">Coroot works on top of the telemetry data stored in your Prometheus server.</div>
         <v-text-field
@@ -64,6 +65,13 @@
         <div class="subtitle-1">Extra selector</div>
         <div class="caption">An additional metric selector that will be added to every Prometheus query (e.g. <var>{cluster="us-west-1"}</var>)</div>
         <v-text-field outlined dense v-model="form.extra_selector" :rules="[$validators.isPrometheusSelector]" single-line :disabled="form.global" />
+
+        <div class="subtitle-1">Remote Write URL</div>
+        <div class="caption">
+            If you're using a drop-in Prometheus replacement like VictoriaMetrics in cluster mode, you may need to configure a different Remote Write
+            URL. By default, Coroot appends <var>/api/v1/write</var> to the base URL configured above.
+        </div>
+        <v-text-field outlined dense v-model="form.remote_write_url" :rules="[$validators.isUrl]" single-line :disabled="form.global" />
 
         <v-alert v-if="error" color="red" icon="mdi-alert-octagon-outline" outlined text>
             {{ error }}

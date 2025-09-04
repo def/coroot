@@ -52,18 +52,13 @@ type Container struct {
 	MemoryRequest *timeseries.TimeSeries
 
 	OOMKills *timeseries.TimeSeries
-
-	DNSRequests          map[DNSRequest]map[string]*timeseries.TimeSeries
-	DNSRequestsHistogram map[float32]*timeseries.TimeSeries
 }
 
 func NewContainer(id, name string) *Container {
 	return &Container{
-		Id:                   id,
-		Name:                 name,
-		ApplicationTypes:     map[ApplicationType]bool{},
-		DNSRequests:          map[DNSRequest]map[string]*timeseries.TimeSeries{},
-		DNSRequestsHistogram: map[float32]*timeseries.TimeSeries{},
+		Id:               id,
+		Name:             name,
+		ApplicationTypes: map[ApplicationType]bool{},
 	}
 }
 
@@ -85,7 +80,7 @@ func ContainerIdToServiceName(containerId string) string {
 	return containerId
 }
 
-func GuessService(services []string, appId ApplicationId) string {
+func guessService(services []string, appId ApplicationId) string {
 	for _, s := range services {
 		if s == appId.Name {
 			return s
@@ -105,4 +100,20 @@ func GuessService(services []string, appId ApplicationId) string {
 		return s
 	}
 	return ""
+}
+
+func GuessService(services []string, w *World, app *Application) string {
+	service := guessService(services, app.Id)
+	if service == "" {
+		return ""
+	}
+	for id := range w.Applications {
+		if app.Id == id {
+			continue
+		}
+		if s := guessService(services, id); s == service {
+			return ""
+		}
+	}
+	return service
 }

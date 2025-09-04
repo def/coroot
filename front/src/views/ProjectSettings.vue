@@ -1,18 +1,22 @@
 <template>
     <v-form v-if="form" v-model="valid" ref="form" style="max-width: 800px">
+        <v-alert v-if="readonly" color="primary" outlined text>
+            This project is defined through the config and cannot be modified via the UI.
+        </v-alert>
         <div class="caption">
-            Project is a separate infrastructure or environment with a dedicated Prometheus, e.g. <var>production</var>, <var>staging</var> or
-            <var>prod-us-west</var>.
+            Project is a separate infrastructure or environment, e.g. <var>production</var>, <var>staging</var> or <var>prod-us-west</var>.
         </div>
-        <v-text-field v-model="form.name" :rules="[$validators.isSlug]" outlined dense required />
+        <v-form v-model="valid" :disabled="readonly" @submit.prevent="save">
+            <v-text-field v-model="form.name" :rules="[$validators.isSlug]" outlined dense required />
 
-        <v-alert v-if="error" color="red" icon="mdi-alert-octagon-outline" outlined text>
-            {{ error }}
-        </v-alert>
-        <v-alert v-if="message" color="green" outlined text>
-            {{ message }}
-        </v-alert>
-        <v-btn block color="primary" @click="save" :disabled="!valid" :loading="loading">Save</v-btn>
+            <v-alert v-if="error" color="red" icon="mdi-alert-octagon-outline" outlined text>
+                {{ error }}
+            </v-alert>
+            <v-alert v-if="message" color="green" outlined text>
+                {{ message }}
+            </v-alert>
+            <v-btn block color="primary" @click="save" :disabled="readonly || !valid" :loading="loading">Save</v-btn>
+        </v-form>
     </v-form>
 </template>
 
@@ -27,6 +31,7 @@ export default {
             form: {
                 name: '',
             },
+            readonly: false,
             valid: false,
             loading: false,
             error: '',
@@ -54,16 +59,17 @@ export default {
                     this.error = error;
                     return;
                 }
+                this.readonly = data.readonly;
                 this.form.name = data.name;
-                if (!this.form) {
-                    return;
-                }
                 if (!this.projectId && this.$refs.form) {
                     this.$refs.form.resetValidation();
                 }
             });
         },
         save() {
+            if (!this.valid) {
+                return;
+            }
             this.loading = true;
             this.error = '';
             this.message = '';

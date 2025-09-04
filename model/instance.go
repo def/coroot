@@ -42,11 +42,17 @@ type Instance struct {
 
 	Volumes []*Volume
 
+	GPUUsage map[string]*InstanceGPUUsage
+
 	Upstreams map[ConnectionKey]*Connection
+
+	Requests Requests
 
 	TcpListens map[Listen]bool
 
 	Containers map[string]*Container
+
+	Annotations ApplicationAnnotations
 
 	ClusterName      LabelLastValue
 	clusterRole      *timeseries.TimeSeries
@@ -61,11 +67,13 @@ type Instance struct {
 
 func NewInstance(name string, owner *Application) *Instance {
 	return &Instance{
-		Name:       name,
-		Owner:      owner,
-		Containers: map[string]*Container{},
-		Upstreams:  map[ConnectionKey]*Connection{},
-		TcpListens: map[Listen]bool{},
+		Name:        name,
+		Owner:       owner,
+		Annotations: ApplicationAnnotations{},
+		Containers:  map[string]*Container{},
+		Upstreams:   map[ConnectionKey]*Connection{},
+		TcpListens:  map[Listen]bool{},
+		GPUUsage:    map[string]*InstanceGPUUsage{},
 	}
 }
 
@@ -232,8 +240,27 @@ func (instance *Instance) IsListenActive(ip, port string) bool {
 	return false
 }
 
+func (instance *Instance) NodeContainerID() *NodeContainerId {
+	if instance.Node == nil {
+		return nil
+	}
+	for _, c := range instance.Containers {
+		return &NodeContainerId{
+			NodeId:      instance.Node.Id,
+			ContainerId: c.Id,
+		}
+	}
+	return nil
+}
+
 type Listen struct {
 	IP      string
 	Port    string
 	Proxied bool
+}
+
+type Requests struct {
+	Ok           *timeseries.TimeSeries
+	Failed       *timeseries.TimeSeries
+	TotalLatency *timeseries.TimeSeries
 }

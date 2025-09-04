@@ -8,6 +8,7 @@ import (
 	"path"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/lib/pq"
 	_ "github.com/lib/pq"
 	"github.com/mattn/go-sqlite3"
@@ -30,24 +31,28 @@ var (
 type DB struct {
 	typ Type
 	db  *sql.DB
+
+	primaryLockConn *sql.Conn
 }
 
-func Open(dataDir string, pgConnString string) (*DB, error) {
-	var db *sql.DB
-	var err error
-	var typ Type
-	if pgConnString != "" {
-		typ = TypePostgres
-		db, err = postgres(pgConnString)
-	} else {
-		typ = TypeSqlite
-		db, err = sqlite(path.Join(dataDir, "db.sqlite"))
-	}
+func NewSqlite(dataDir string) (*DB, error) {
+	db, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?mode=rwc", path.Join(dataDir, "db.sqlite")))
 	if err != nil {
 		return nil, err
 	}
+	if _, err = db.Exec("PRAGMA foreign_keys = ON"); err != nil {
+		return nil, err
+	}
 	db.SetMaxOpenConns(1)
-	return &DB{typ: typ, db: db}, nil
+	return &DB{typ: TypeSqlite, db: db}, nil
+}
+
+func NewPostgres(dsn string) (*DB, error) {
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return nil, err
+	}
+	return &DB{typ: TypePostgres, db: db}, nil
 }
 
 func (db *DB) Type() Type {
@@ -58,8 +63,20 @@ func (db *DB) DB() *sql.DB {
 	return db.db
 }
 
+func (db *DB) Exec(query string, args ...any) (sql.Result, error) {
+	return db.db.Exec(query, args...)
+}
+
+func (db *DB) Query(query string, args ...any) (*sql.Rows, error) {
+	return db.db.Query(query, args...)
+}
+
+func (db *DB) QueryRow(query string, args ...any) *sql.Row {
+	return db.db.QueryRow(query, args...)
+}
+
 func (db *DB) Migrator() *Migrator {
-	return NewMigrator(db.typ, db.db)
+	return NewMigrator(db.typ, db)
 }
 
 func (db *DB) Migrate(extraTables ...Table) error {
@@ -70,6 +87,7 @@ func (db *DB) Migrate(extraTables ...Table) error {
 		&IncidentNotification{},
 		&ApplicationDeployment{},
 		&ApplicationSettings{},
+		&Dashboards{},
 		&Setting{},
 		&User{},
 	}
@@ -88,19 +106,26 @@ func (db *DB) IsUniqueViolationError(err error) bool {
 	return false
 }
 
-func sqlite(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite3", fmt.Sprintf("file:%s?mode=rwc", path))
+func (db *DB) GetDeploymentUuid() (string, error) {
+	settingKey := "deployment_uuid"
+	var id string
+	err := db.GetSetting(settingKey, &id)
+	if err == nil {
+		return id, nil
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return "", err
+	}
+	uid, err := uuid.NewRandom()
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
-		return nil, err
+	id = uid.String()
+	err = db.SetSetting(settingKey, id)
+	if err != nil {
+		return "", err
 	}
-	return db, nil
-}
-
-func postgres(dsn string) (*sql.DB, error) {
-	return sql.Open("postgres", dsn)
+	return id, nil
 }
 
 type Table interface {
@@ -109,10 +134,10 @@ type Table interface {
 
 type Migrator struct {
 	typ Type
-	db  *sql.DB
+	db  *DB
 }
 
-func NewMigrator(t Type, db *sql.DB) *Migrator {
+func NewMigrator(t Type, db *DB) *Migrator {
 	return &Migrator{typ: t, db: db}
 }
 
@@ -138,7 +163,7 @@ func (m *Migrator) Exec(query string, args ...any) error {
 func (m *Migrator) AddColumnIfNotExists(table, column, dataType string) error {
 	switch m.typ {
 	case TypeSqlite:
-		rows, err := m.db.Query("SELECT name FROM pragma_table_info('project');")
+		rows, err := m.db.Query(fmt.Sprintf("SELECT name FROM pragma_table_info('%s');", table))
 		if err != nil {
 			return nil
 		}

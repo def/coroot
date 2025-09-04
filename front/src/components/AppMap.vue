@@ -10,9 +10,14 @@
                 @mouseleave="unfocus"
             >
                 <div>
-                    <router-link :to="{ name: 'overview', params: { view: 'applications', id: app.id }, query: $utils.contextQuery() }" class="name">
-                        <AppHealth :app="app" />
-                    </router-link>
+                    <div class="d-flex align-center">
+                        <div class="flex-grow-1 name">
+                            <router-link :to="{ name: 'overview', params: { view: 'applications', id: app.id }, query: $utils.contextQuery() }">
+                                <AppHealth :app="app" />
+                            </router-link>
+                        </div>
+                        <AppIcon :icon="app.icon" class="ml-1" />
+                    </div>
                     <Labels v-if="!hideLabels(clients)" :labels="app.labels" class="d-none d-sm-block label" />
                 </div>
             </div>
@@ -37,21 +42,17 @@
         <div class="column">
             <div v-if="map.application" class="app" :ref="map.application.id">
                 <div>
-                    <span class="name">
-                        <AppHealth :app="map.application" />
-                        <AppPreferences :app="map.application" :categories="map.categories" />
-                    </span>
+                    <div class="d-flex align-center">
+                        <div class="flex-grow-1 name">
+                            <AppHealth :app="map.application" />
+                            <AppPreferences :app="map.application" :categories="map.categories" />
+                        </div>
+                        <AppIcon :icon="map.application.icon" />
+                    </div>
                     <Labels :labels="map.application.labels" class="d-none d-sm-block label" />
                 </div>
                 <div v-if="instances && instances.length" class="instances">
-                    <div
-                        v-for="i in instances"
-                        class="instance"
-                        :ref="'instance:' + i.id"
-                        :class="{ hi: highlighted.instances.has(i.id) }"
-                        @mouseenter="focus('instance', i.id)"
-                        @mouseleave="unfocus"
-                    >
+                    <div v-for="i in instances" class="instance" :ref="'instance:' + i.id" :class="{ hi: highlighted.instances.has(i.id) }">
                         <div class="d-flex align-center" style="gap: 2px">
                             <div class="name flex-grow-1" :title="i.id">{{ i.id }}</div>
                             <div>
@@ -149,9 +150,14 @@
                 @mouseleave="unfocus"
             >
                 <div>
-                    <router-link :to="{ name: 'overview', params: { view: 'applications', id: app.id }, query: $utils.contextQuery() }" class="name">
-                        <AppHealth :app="app" />
-                    </router-link>
+                    <div class="d-flex align-center">
+                        <div class="flex-grow-1 name">
+                            <router-link :to="{ name: 'overview', params: { view: 'applications', id: app.id }, query: $utils.contextQuery() }">
+                                <AppHealth :app="app" />
+                            </router-link>
+                        </div>
+                        <AppIcon :icon="app.icon" class="ml-1" />
+                    </div>
                     <Labels v-if="!hideLabels(dependencies)" :labels="app.labels" class="d-none d-sm-block label" />
                 </div>
             </div>
@@ -230,6 +236,7 @@
 <script>
 import Labels from './Labels';
 import AppHealth from './AppHealth';
+import AppIcon from './AppIcon.vue';
 import AppPreferences from '@/components/AppPreferences.vue';
 
 const collapseThreshold = 10;
@@ -239,7 +246,7 @@ export default {
         map: Object,
     },
 
-    components: { AppPreferences, Labels, AppHealth },
+    components: { AppPreferences, Labels, AppHealth, AppIcon },
 
     data() {
         return {
@@ -347,36 +354,19 @@ export default {
         },
         links() {
             const links = [];
-            (this.map.instances || []).forEach((i) => {
-                const me = (focused) => focused.instance && focused.instance === i.id;
-                const lo = (focused) => (Object.keys(focused).length ? 'lo' : '');
-                (i.clients || []).forEach((a) => {
-                    if (!this.clients.find((c) => c.id === a.id) || !this.instances.find((ii) => ii.id === i.id)) {
-                        return;
-                    }
-                    const from = a.id;
-                    const to = 'instance:' + i.id;
-                    const hi = (focused) => (me(focused) || (focused.client && focused.client === from) ? 'hi' : lo(focused));
-                    links.push({ from, to, status: a.status, stats: a.stats, weight: a.weight, direction: a.direction, hi });
-                });
-                (i.dependencies || []).forEach((a) => {
-                    if (!this.dependencies.find((d) => d.id === a.id) || !this.instances.find((ii) => ii.id === i.id)) {
-                        return;
-                    }
-                    const from = 'instance:' + i.id;
-                    const to = a.id;
-                    const hi = (focused) => (me(focused) || (focused.dependency && focused.dependency === to) ? 'hi' : lo(focused));
-                    links.push({ from, to, status: a.status, stats: a.stats, weight: a.weight, direction: a.direction, hi });
-                });
-                (i.internal_links || []).forEach((l) => {
-                    if (!this.instances.find((ii) => ii.id === i.id) || !this.instances.find((ii) => ii.id === l.id)) {
-                        return;
-                    }
-                    const from = 'instance:' + i.id;
-                    const to = 'instance:' + l.id;
-                    const hi = (focused) => (me(focused) || (focused.instance && focused.instance === l.id) ? 'hi' : lo(focused));
-                    links.push({ from, to, status: l.status, direction: l.direction, hi, internal: true });
-                });
+            const lo = (focused) => (Object.keys(focused).length ? 'lo' : '');
+
+            (this.clients || []).forEach((a) => {
+                const from = a.id;
+                const to = this.map.application.id;
+                const hi = (focused) => (focused.client && focused.client === from ? 'hi' : lo(focused));
+                links.push({ from, to, status: a.link_status, stats: a.link_stats, weight: a.link_weight, direction: a.link_direction, hi });
+            });
+            (this.dependencies || []).forEach((a) => {
+                const from = this.map.application.id;
+                const to = a.id;
+                const hi = (focused) => (focused.dependency && focused.dependency === to ? 'hi' : lo(focused));
+                links.push({ from, to, status: a.link_status, stats: a.link_stats, weight: a.link_weight, direction: a.link_direction, hi });
             });
             return links;
         },
@@ -461,7 +451,7 @@ export default {
     position: relative;
     gap: 16px;
     overflow-x: auto;
-    padding: 10px 0;
+    padding: 0;
 }
 .column {
     flex-basis: 10%; /* to keep some space if no clients or no dependencies */
@@ -576,5 +566,6 @@ svg {
     background-color: var(--background-color-hi);
     padding: 2px;
     border-radius: 2px;
+    pointer-events: none;
 }
 </style>

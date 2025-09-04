@@ -1,12 +1,5 @@
 package model
 
-import (
-	"fmt"
-	"sort"
-
-	"github.com/coroot/coroot/utils"
-)
-
 type ApplicationCategory string
 
 const (
@@ -48,7 +41,7 @@ var BuiltinCategoryPatterns = map[ApplicationCategory][]string{
 		"*/containerd",
 		"*/docker*",
 		"*/*chaos-*",
-		"istio-system/*",
+		"istio*/*",
 		"amazon-cloudwatch/*",
 		"karpenter/*",
 		"cert-manager/*",
@@ -59,7 +52,7 @@ var BuiltinCategoryPatterns = map[ApplicationCategory][]string{
 		"keda/*",
 		"keycloak/*",
 		"longhorn-system/*",
-		"calico-system/*",
+		"calico*/*",
 		"_/esm-cache",
 		"_/*motd*",
 		"_/*apt*",
@@ -70,6 +63,11 @@ var BuiltinCategoryPatterns = map[ApplicationCategory][]string{
 		"litmus/*",
 		"openshift*/*",
 		"_/crio*",
+		"*/coredns",
+		"chaos-mesh/*",
+		"cilium/*",
+		"external-dns/*",
+		"gpu-operator/*",
 	},
 	ApplicationCategoryMonitoring: {
 		"monitoring/*",
@@ -83,30 +81,16 @@ var BuiltinCategoryPatterns = map[ApplicationCategory][]string{
 		"metrics-server/*",
 		"loki/*",
 		"observability/*",
+		"jaeger/*",
+		"thanos/*",
+		"sentry/*",
+		"*/*victoria-metrics*",
+		"*/*victoria-logs*",
+		"*/*vminsert*",
+		"*/*vmselect*",
+		"*/*vmstorage*",
+		"*/*vmagent*",
+		"datadog/*",
+		"*/*datadog*",
 	},
-}
-
-func CalcApplicationCategory(appId ApplicationId, customPatterns map[ApplicationCategory][]string) ApplicationCategory {
-	categories := make([]ApplicationCategory, 0, len(BuiltinCategoryPatterns)+len(customPatterns))
-	for c := range BuiltinCategoryPatterns {
-		categories = append(categories, c)
-	}
-	for c := range customPatterns {
-		if _, ok := BuiltinCategoryPatterns[c]; ok {
-			continue
-		}
-		categories = append(categories, c)
-	}
-	sort.Slice(categories, func(i, j int) bool {
-		return categories[i] < categories[j]
-	})
-
-	id := fmt.Sprintf("%s/%s", appId.Namespace, appId.Name)
-	for _, c := range categories {
-		if utils.GlobMatch(id, BuiltinCategoryPatterns[c]...) || utils.GlobMatch(id, customPatterns[c]...) {
-			return c
-		}
-	}
-
-	return ApplicationCategoryApplication
 }

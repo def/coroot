@@ -1,26 +1,22 @@
 <template>
-    <div class="traces">
-        <v-alert v-if="error" color="red" icon="mdi-alert-octagon-outline" outlined text>
-            {{ error }}
-        </v-alert>
-
-        <v-alert v-else-if="view.message" color="info" outlined text class="message">
+    <Views :error="error" class="traces">
+        <v-alert v-if="view.message" color="info" outlined text class="message">
             <template v-if="view.message === 'not_found'">
                 This page only shows traces from OpenTelemetry integrations, not from eBPF.
                 <div class="mt-2">
                     <OpenTelemetryIntegration color="primary">Integrate OpenTelemetry</OpenTelemetryIntegration>
-                </div></template
-            >
+                </div>
+            </template>
             <template v-if="view.message === 'no_clickhouse'"> Clickhouse integration is not configured. </template>
         </v-alert>
 
         <template v-else>
-            <div class="mt-4 d-flex">
+            <div class="d-flex">
                 <v-spacer />
                 <OpenTelemetryIntegration small color="primary">Integrate OpenTelemetry</OpenTelemetryIntegration>
             </div>
 
-            <v-alert v-if="view.error" color="error" icon="mdi-alert-octagon-outline" outlined text>
+            <v-alert v-if="view.error" color="error" icon="mdi-alert-octagon-outline" outlined text class="mt-2">
                 {{ view.error }}
             </v-alert>
 
@@ -138,11 +134,15 @@
             </v-card>
 
             <div v-if="query.trace_id" class="mt-5" style="min-height: 50vh">
-                <div class="text-md-h6 mb-3">
-                    <router-link :to="openView('traces')">
-                        <v-icon>mdi-arrow-left</v-icon>
-                    </router-link>
-                    Trace {{ query.trace_id }}
+                <div class="d-flex">
+                    <div class="text-md-h6 mb-3">
+                        <router-link :to="openView('traces')">
+                            <v-icon>mdi-arrow-left</v-icon>
+                        </router-link>
+                        Trace {{ query.trace_id }}
+                    </div>
+                    <v-spacer />
+                    <v-btn v-if="logsLink" :to="logsLink" small color="primary"> Show logs </v-btn>
                 </div>
                 <TracingTrace v-if="view.trace" :spans="view.trace" />
             </div>
@@ -394,10 +394,11 @@
                 />
             </div>
         </template>
-    </div>
+    </Views>
 </template>
 
 <script>
+import Views from '@/views/Views.vue';
 import { palette } from '../utils/colors';
 import Heatmap from '../components/Heatmap.vue';
 import TracingTrace from '../components/TracingTrace.vue';
@@ -405,7 +406,7 @@ import FlameGraph from '../components/FlameGraph.vue';
 import OpenTelemetryIntegration from '@/views/OpenTelemetryIntegration.vue';
 
 export default {
-    components: { OpenTelemetryIntegration, FlameGraph, TracingTrace, Heatmap },
+    components: { Views, OpenTelemetryIntegration, FlameGraph, TracingTrace, Heatmap },
 
     data() {
         return {
@@ -421,7 +422,6 @@ export default {
     },
 
     mounted() {
-        this.get();
         this.$events.watch(this, this.get, 'refresh');
     },
 
@@ -490,6 +490,10 @@ export default {
                 gap: gap + 'px',
                 attrWidth: `calc((100% - ${(cols - 1) * gap}px) / ${cols})`,
             };
+        },
+        logsLink() {
+            const query = JSON.stringify({ view: 'messages', filters: [{ name: 'TraceId', op: '=', value: this.query.trace_id }] });
+            return { params: { view: 'logs' }, query: { query, ...this.$utils.contextQuery() } };
         },
     },
 

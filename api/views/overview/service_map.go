@@ -12,6 +12,7 @@ type Application struct {
 	Category   model.ApplicationCategory `json:"category"`
 	Labels     model.Labels              `json:"labels"`
 	Status     model.Status              `json:"status"`
+	Icon       string                    `json:"icon"`
 	Indicators []model.Indicator         `json:"indicators"`
 
 	Upstreams   []Link `json:"upstreams"`
@@ -36,6 +37,7 @@ func renderServiceMap(w *model.World) []*Application {
 			Category:    a.Category,
 			Labels:      a.Labels(),
 			Status:      a.Status,
+			Icon:        a.ApplicationType().Icon(),
 			Indicators:  model.CalcIndicators(a),
 			Upstreams:   []Link{},
 			Downstreams: []Link{},
@@ -44,52 +46,37 @@ func renderServiceMap(w *model.World) []*Application {
 		upstreams := map[model.ApplicationId]struct {
 			status       model.Status
 			statusReason string
-			connections  []*model.Connection
+			connection   *model.AppToAppConnection
 		}{}
 		downstreams := map[model.ApplicationId]bool{}
-		for _, i := range a.Instances {
-			if i.IsObsolete() {
+		for _, u := range a.Upstreams {
+			if u.RemoteApplication == a {
 				continue
 			}
-			for _, u := range i.Upstreams {
-				if u.IsObsolete() || u.RemoteApplication == nil || u.RemoteApplication == a {
-					continue
-				}
-				status, statusReason := u.Status()
-				s := upstreams[u.RemoteApplication.Id]
-				if status >= s.status {
-					s.status = status
-					s.statusReason = statusReason
-				}
-				s.connections = append(s.connections, u)
-				upstreams[u.RemoteApplication.Id] = s
+			status, statusReason := u.Status()
+			s := upstreams[u.RemoteApplication.Id]
+			if status >= s.status {
+				s.status = status
+				s.statusReason = statusReason
 			}
+			s.connection = u
+			upstreams[u.RemoteApplication.Id] = s
 		}
 		for _, d := range a.Downstreams {
-			if d.IsObsolete() || d.Instance.Owner == a {
+			if d.Application == a {
 				continue
 			}
-			downstreams[d.Instance.Owner.Id] = true
+			downstreams[d.Application.Id] = true
 		}
 
 		for id, s := range upstreams {
 			l := Link{Id: id, Status: s.status}
-			requests := model.GetConnectionsRequestsSum(s.connections, nil).Last()
-			latency := model.GetConnectionsRequestsLatency(s.connections, nil).Last()
+			requests := s.connection.GetConnectionsRequestsSum(nil).Last()
+			latency := s.connection.GetConnectionsRequestsLatency(nil).Last()
 			if !timeseries.IsNaN(requests) {
 				l.Weight = requests
 			}
-			var bytesSent, bytesReceived float32
-
-			for _, c := range s.connections {
-				if v := c.BytesSent.Last(); !timeseries.IsNaN(v) {
-					bytesSent += v
-				}
-				if v := c.BytesReceived.Last(); !timeseries.IsNaN(v) {
-					bytesReceived += v
-				}
-			}
-			l.Stats = utils.FormatLinkStats(requests, latency, bytesSent, bytesReceived, s.statusReason)
+			l.Stats = utils.FormatLinkStats(requests, latency, s.connection.BytesSent.Last(), s.connection.BytesReceived.Last(), s.statusReason)
 			app.Upstreams = append(app.Upstreams, l)
 			used[a.Id] = true
 			used[id] = true

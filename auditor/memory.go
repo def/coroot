@@ -13,28 +13,29 @@ func (a *appAuditor) memory(ncs nodeConsumersByNode) {
 	leakCheck := report.CreateCheck(model.Checks.MemoryLeakPercent)
 
 	usageChart := report.GetOrCreateChartGroup(
-		"Memory usage (RSS) <selector>, bytes",
-		model.NewDocLink("inspections", "memory", "usage"),
+		"Memory usage <selector>, bytes",
+		model.NewDocLink("inspections", "memory", "memory-usage"),
 	)
 	oomChart := report.GetOrCreateChart(
 		"Out of memory events",
-		model.NewDocLink("inspections", "memory", "oom"),
+		model.NewDocLink("inspections", "memory", "out-of-memory-events"),
 	).Column()
 	nodesChart := report.GetOrCreateChart(
 		"Node memory usage (unreclaimable), %",
-		model.NewDocLink("inspections", "memory", "node_usage"),
+		model.NewDocLink("inspections", "memory", "node-memory-usage-unreclaimable"),
 	)
 	consumersChart := report.GetOrCreateChartGroup(
 		"Memory consumers <selector>, bytes",
-		model.NewDocLink("inspections", "memory", "consumers"),
+		model.NewDocLink("inspections", "memory", "memory-consumers"),
 	)
 
 	seenContainers := false
 	limitByContainer := map[string]*timeseries.Aggregate{}
-	totalRss := timeseries.NewAggregate(timeseries.NanSum)
 	for _, i := range a.app.Instances {
 		oom := timeseries.NewAggregate(timeseries.NanSum)
 		instanceRss := timeseries.NewAggregate(timeseries.NanSum)
+		instanceRssForTrend := timeseries.NewAggregate(timeseries.NanSum)
+		instancePageCache := timeseries.NewAggregate(timeseries.NanSum)
 		for _, c := range i.Containers {
 			seenContainers = true
 			if limitByContainer[c.Name] == nil {
@@ -42,14 +43,31 @@ func (a *appAuditor) memory(ncs nodeConsumersByNode) {
 			}
 			limitByContainer[c.Name].Add(c.MemoryLimit)
 			if usageChart != nil {
-				usageChart.GetOrCreateChart("container: "+c.Name).AddSeries(i.Name, c.MemoryRss)
+				usageChart.GetOrCreateChart("RSS container: "+c.Name).AddSeries(i.Name, c.MemoryRss)
 			}
 			oom.Add(c.OOMKills)
-			totalRss.Add(c.MemoryRssForTrend)
+			instanceRssForTrend.Add(c.MemoryRssForTrend)
 			instanceRss.Add(c.MemoryRss)
+			instancePageCache.Add(c.MemoryCache)
 		}
-		if usageChart != nil && len(usageChart.Charts) > 1 {
-			usageChart.GetOrCreateChart("total").AddSeries(i.Name, instanceRss).Feature()
+		if a.app.PeriodicJob() {
+			leakCheck.SetStatus(model.UNKNOWN, "not checked for periodic jobs")
+		} else {
+			v := instanceRssForTrend.Get().MapInPlace(timeseries.ZeroToNan)
+			if v.Reduce(timeseries.NanCount) > float32(v.Len())*0.8 { // we require 80% of the data to be present
+				if lr := timeseries.NewLinearRegression(v); lr != nil {
+					s := lr.Calc(a.w.Ctx.To.Add(-timeseries.Hour))
+					e := lr.Calc(a.w.Ctx.To)
+					if s > 0 && e > 0 {
+						leakCheck.SetValue((e - s) / s * 100)
+					}
+				}
+			}
+		}
+
+		if usageChart != nil {
+			usageChart.GetOrCreateChart("RSS").AddSeries(i.Name, instanceRss).Feature()
+			usageChart.GetOrCreateChart("RSS + PageCache").AddSeries(i.Name, timeseries.Sum(instanceRss.Get(), instancePageCache.Get()))
 		}
 
 		oomTs := oom.Get()
@@ -86,7 +104,7 @@ func (a *appAuditor) memory(ncs nodeConsumersByNode) {
 
 	if usageChart != nil {
 		for container, limit := range limitByContainer {
-			usageChart.GetOrCreateChart("container: "+container).SetThreshold("limit", limit.Get())
+			usageChart.GetOrCreateChart("RSS container: "+container).SetThreshold("limit", limit.Get())
 		}
 	}
 
@@ -99,24 +117,9 @@ func (a *appAuditor) memory(ncs nodeConsumersByNode) {
 				SetArg("query", model.ProfileCategoryMemory)
 		}
 	}
-
 	if !seenContainers {
 		oomCheck.SetStatus(model.UNKNOWN, "no data")
 		leakCheck.SetStatus(model.UNKNOWN, "no data")
 		return
-	}
-	if a.app.PeriodicJob() {
-		leakCheck.SetStatus(model.UNKNOWN, "not checked for periodic jobs")
-	} else {
-		v := totalRss.Get().MapInPlace(timeseries.ZeroToNan)
-		if v.Reduce(timeseries.NanCount) > float32(v.Len())*0.8 { // we require 80% of the data to be present
-			if lr := timeseries.NewLinearRegression(v); lr != nil {
-				s := lr.Calc(a.w.Ctx.To.Add(-timeseries.Hour))
-				e := lr.Calc(a.w.Ctx.To)
-				if s > 0 && e > 0 {
-					leakCheck.SetValue((e - s) / s * 100)
-				}
-			}
-		}
 	}
 }

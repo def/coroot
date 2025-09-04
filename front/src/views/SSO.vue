@@ -1,16 +1,22 @@
 <template>
     <div>
+        <v-alert v-if="error" color="red" icon="mdi-alert-octagon-outline" outlined text class="mt-2">
+            {{ error }}
+        </v-alert>
         <v-alert v-if="disabled" color="info" outlined text>
             Single Sign-On through SAML is available only in Coroot Enterprise (from $1 per CPU core/month).
             <a href="https://coroot.com/account" target="_blank" class="font-weight-bold">Start</a> your free trial today.
         </v-alert>
-        <v-simple-table dense class="params">
+        <v-alert v-if="readonly" color="primary" outlined text>
+            Single Sing-On is configured through the config and cannot be modified via the UI.
+        </v-alert>
+        <v-simple-table v-if="status !== 403" dense class="params">
             <tbody>
                 <tr>
                     <td class="font-weight-medium text-no-wrap">Status</td>
                     <td>
-                        <div v-if="active">
-                            <v-icon v-if="active" color="success" class="mr-1" size="20">mdi-check-circle</v-icon>
+                        <div v-if="enabled">
+                            <v-icon color="success" class="mr-1" size="20">mdi-check-circle</v-icon>
                             Enabled
                         </div>
                         <div v-else>Disabled</div>
@@ -21,10 +27,10 @@
                     <td>
                         <span v-if="provider" style="vertical-align: middle">{{ provider }}</span>
                         <input ref="file" type="file" accept=".xml" @change="upload" class="d-none" />
-                        <v-btn v-if="!provider" color="primary" small :disabled="disabled || loading" @click="$refs.file.click()">
+                        <v-btn v-if="!provider" color="primary" small :disabled="disabled || loading || readonly" @click="$refs.file.click()">
                             Upload Identity Provider Metadata XML
                         </v-btn>
-                        <v-btn v-else :disabled="disabled || loading" small icon @click="$refs.file.click()">
+                        <v-btn v-else :disabled="disabled || loading || readonly" small icon @click="$refs.file.click()">
                             <v-icon small>mdi-pencil</v-icon>
                         </v-btn>
                     </td>
@@ -51,7 +57,7 @@
                         <v-select
                             v-model="default_role"
                             :items="roles"
-                            :disabled="disabled"
+                            :disabled="disabled || readonly"
                             outlined
                             dense
                             :menu-props="{ offsetY: true }"
@@ -63,14 +69,11 @@
                 </tr>
             </tbody>
         </v-simple-table>
-        <v-alert v-if="error" color="red" icon="mdi-alert-octagon-outline" outlined text class="mt-2">
-            {{ error }}
-        </v-alert>
-        <div class="d-flex mt-2" style="gap: 8px">
-            <v-btn color="primary" small :disabled="disabled || loading || !provider" @click="save">
-                Save <template v-if="!active">and Enable</template>
+        <div v-if="status !== 403" class="d-flex mt-2" style="gap: 8px">
+            <v-btn color="primary" small :disabled="disabled || loading || readonly || !provider" @click="save">
+                Save <template v-if="!enabled">and Enable</template>
             </v-btn>
-            <v-btn v-if="active" color="error" small :disabled="disabled || loading" @click="disable">Disable</v-btn>
+            <v-btn v-if="enabled" color="error" small :disabled="disabled || loading || readonly" @click="disable">Disable</v-btn>
         </div>
     </div>
 </template>
@@ -88,13 +91,14 @@ export default {
 
     data() {
         return {
-            disabled: true,
+            disabled: this.$coroot.edition !== 'Enterprise',
+            readonly: false,
             loading: false,
             error: '',
-            active: false,
+            status: undefined,
+            enabled: false,
             default_role: '',
             provider: '',
-            sso_url: '',
             roles: [],
         };
     },
@@ -108,34 +112,35 @@ export default {
         get() {
             this.loading = true;
             this.error = '';
-            this.$api.sso(null, (data, error) => {
+            this.status = undefined;
+            this.$api.sso(null, (data, error, status) => {
                 this.loading = false;
                 if (error) {
                     this.error = error;
+                    this.status = status;
                     return;
                 }
-                this.disabled = !data.configurable;
-                this.available = data.available;
-                this.active = data.active;
+                this.readonly = data.readonly;
+                this.enabled = data.enabled;
                 this.default_role = data.default_role;
                 this.provider = data.provider;
-                this.sso_url = data.sso_url;
                 this.roles = data.roles || [];
             });
         },
         post(action, metadata) {
             this.loading = true;
-            this.alert = { msg: '', color: '' };
+            this.error = '';
+            this.status = undefined;
             const form = {
                 action,
                 default_role: this.default_role,
                 saml: metadata ? { metadata } : undefined,
             };
-            this.$api.sso(form, (data, error) => {
+            this.$api.sso(form, (data, error, status) => {
                 this.loading = false;
-                console.log(error);
                 if (error) {
                     this.error = error;
+                    this.status = status;
                     return;
                 }
                 this.get();
@@ -156,21 +161,6 @@ export default {
             file.text().then((v) => {
                 this.post('upload', v);
             });
-        },
-        copy(text) {
-            const textarea = document.createElement('textarea');
-            textarea.value = text;
-            textarea.focus();
-            textarea.select();
-            try {
-                document.execCommand('copy');
-                this.copied = true;
-                setTimeout(() => {
-                    this.copied = false;
-                }, 3000);
-            } finally {
-                // this.$refs.code.removeChild(textarea);
-            }
         },
     },
 };

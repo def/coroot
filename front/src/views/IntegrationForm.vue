@@ -4,7 +4,7 @@
             <div class="d-flex align-center font-weight-medium mb-4">
                 <div>
                     Configure {{ title }} integration
-                    <a :href="`https://coroot.com/docs/coroot/alerting/${type}`" target="_blank">
+                    <a :href="`https://docs.coroot.com/alerting/${type}`" target="_blank">
                         <v-icon>mdi-information-outline</v-icon>
                     </a>
                     <v-progress-circular v-if="loading" indeterminate color="green" size="30" />
@@ -19,17 +19,17 @@
                 <IntegrationFormOpsgenie v-if="type === 'opsgenie'" :form="form" />
                 <IntegrationFormWebhook v-if="type === 'webhook'" :form="form" />
 
-                <v-alert v-if="error" color="red" icon="mdi-alert-octagon-outline" outlined text class="my-4">
+                <v-alert v-if="error" color="error" icon="mdi-alert-octagon-outline" outlined text class="my-4">
                     {{ error }}
                 </v-alert>
-                <v-alert v-if="message" color="green" outlined text class="my-4">
+                <v-alert v-if="message" color="success" outlined text class="my-4">
                     {{ message }}
                 </v-alert>
                 <div class="d-flex align-center">
                     <v-spacer />
-                    <v-btn v-if="value === 'del'" @click="del" color="red" :loading="saving">Delete</v-btn>
+                    <v-btn v-if="value === 'del'" @click="del" color="error" :loading="saving">Delete</v-btn>
                     <template v-else>
-                        <v-btn @click="test" color="accent" :disabled="!valid" :loading="testing" class="mr-4">Send test alert</v-btn>
+                        <v-btn @click="test" color="secondary" :disabled="!valid" :loading="testing" class="mr-4">Send test alert</v-btn>
                         <v-btn @click="save" color="primary" :disabled="!valid" :loading="saving">Save</v-btn>
                     </template>
                 </div>

@@ -10,12 +10,12 @@ import (
 	"k8s.io/klog"
 )
 
-func logMessage(instance *model.Instance, metric model.MetricValues, pjs promJobStatuses) {
-	level := model.LogLevel(metric.Labels["level"])
-	msgs := instance.Owner.LogMessages[level]
+func logMessage(instance *model.Instance, metric *model.MetricValues, pjs promJobStatuses) {
+	severity := model.SeverityFromString(metric.Labels["level"])
+	msgs := instance.Owner.LogMessages[severity]
 	if msgs == nil {
 		msgs = &model.LogMessages{}
-		instance.Owner.LogMessages[level] = msgs
+		instance.Owner.LogMessages[severity] = msgs
 	}
 	values := timeseries.Increase(metric.Values, pjs.get(metric.Labels))
 	msgs.Messages = merge(msgs.Messages, values, timeseries.NanSum)
@@ -57,7 +57,7 @@ func logMessage(instance *model.Instance, metric model.MetricValues, pjs promJob
 	}
 }
 
-func (c *Constructor) loadContainerLogs(metrics map[string][]model.MetricValues, containers containerCache, pjs promJobStatuses) {
+func (c *Constructor) loadContainerLogs(metrics map[string][]*model.MetricValues, containers containerCache, pjs promJobStatuses) {
 	for _, metric := range metrics["container_log_messages"] {
 		v := containers[metric.NodeContainerId]
 		if v.instance == nil {
@@ -67,7 +67,7 @@ func (c *Constructor) loadContainerLogs(metrics map[string][]model.MetricValues,
 	}
 }
 
-func (c *Constructor) loadApplicationLogs(w *model.World, metrics map[string][]model.MetricValues) {
+func (c *Constructor) loadApplicationLogs(w *model.World, metrics map[string][]*model.MetricValues) {
 	for _, metric := range metrics[qRecordingRuleApplicationLogMessages] {
 		appId, err := model.NewApplicationIdFromString(metric.Labels["application"])
 		if err != nil {
@@ -79,13 +79,13 @@ func (c *Constructor) loadApplicationLogs(w *model.World, metrics map[string][]m
 			continue
 		}
 		if app.LogMessages == nil {
-			app.LogMessages = map[model.LogLevel]*model.LogMessages{}
+			app.LogMessages = map[model.Severity]*model.LogMessages{}
 		}
-		level := model.LogLevel(metric.Labels["level"])
-		msgs := app.LogMessages[level]
+		severity := model.SeverityFromString(metric.Labels["level"])
+		msgs := app.LogMessages[severity]
 		if msgs == nil {
 			msgs = &model.LogMessages{}
-			app.LogMessages[level] = msgs
+			app.LogMessages[severity] = msgs
 		}
 		msgs.Messages = merge(msgs.Messages, metric.Values, timeseries.NanSum)
 		similar := metric.Labels["similar"]

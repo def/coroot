@@ -40,7 +40,7 @@ func NewNodeId(machineID, systemUUID string) NodeId {
 	return NodeId{MachineID: machineID, SystemUUID: systemUUID}
 }
 
-func NewNodeIdFromLabels(mv MetricValues) NodeId {
+func NewNodeIdFromLabels(mv *MetricValues) NodeId {
 	machineID := mv.MachineID
 	systemUUID := mv.SystemUUID
 	if systemUUID == "" {
@@ -74,8 +74,9 @@ type Node struct {
 
 	Disks         map[string]*DiskStats
 	NetInterfaces []*InterfaceStats
+	GPUs          map[string]*GPU
 
-	Instances []*Instance `json:"-"`
+	Instances []*Instance
 
 	CloudProvider     LabelLastValue
 	Region            LabelLastValue
@@ -92,6 +93,7 @@ type NodePrice struct {
 	Total         float32
 	PerCPUCore    float32
 	PerMemoryByte float32
+	Custom        bool
 }
 
 type InternetStartUsageAmountGB int64
@@ -121,6 +123,7 @@ func NewNode(id NodeId) *Node {
 		Id:             id,
 		Disks:          map[string]*DiskStats{},
 		CpuUsageByMode: map[string]*timeseries.TimeSeries{},
+		GPUs:           map[string]*GPU{},
 	}
 }
 
@@ -161,4 +164,28 @@ func (n *Node) Status() Status {
 		return WARNING
 	}
 	return OK
+}
+
+type GPU struct {
+	UUID string
+	Name LabelLastValue
+
+	TotalMemory *timeseries.TimeSeries
+	UsedMemory  *timeseries.TimeSeries
+
+	MemoryUsageAverage *timeseries.TimeSeries
+	MemoryUsagePeak    *timeseries.TimeSeries
+
+	UsageAverage *timeseries.TimeSeries
+	UsagePeak    *timeseries.TimeSeries
+
+	Temperature *timeseries.TimeSeries
+	PowerWatts  *timeseries.TimeSeries
+
+	Instances map[string]*Instance
+}
+
+type InstanceGPUUsage struct {
+	MemoryUsageAverage *timeseries.TimeSeries
+	UsageAverage       *timeseries.TimeSeries
 }
